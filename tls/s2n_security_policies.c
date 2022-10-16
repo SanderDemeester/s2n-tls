@@ -36,6 +36,21 @@ const struct s2n_security_policy security_policy_default_tls13 = {
     .ecc_preferences = &s2n_ecc_preferences_20200310,
 };
 
+/*
+ * This security policy is derived from the following specification:
+ * https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-52r2.pdf
+ *
+ * Supports TLS1.2
+ */
+const struct s2n_security_policy security_policy_default_fips = {
+    .minimum_protocol_version = S2N_TLS12,
+    .cipher_preferences = &cipher_preferences_default_fips,
+    .kem_preferences = &kem_preferences_null,
+    .signature_preferences = &s2n_signature_preferences_default_fips,
+    .certificate_signature_preferences = &s2n_signature_preferences_default_fips,
+    .ecc_preferences = &s2n_ecc_preferences_default_fips,
+};
+
 const struct s2n_security_policy security_policy_20190801 = {
     .minimum_protocol_version = S2N_TLS10,
     .cipher_preferences = &cipher_preferences_20190801,
@@ -348,7 +363,7 @@ const struct s2n_security_policy security_policy_kms_tls_1_0_2021_08 = {
 const struct s2n_security_policy security_policy_kms_pq_tls_1_0_2019_06 = {
     .minimum_protocol_version = S2N_TLS10,
     .cipher_preferences = &cipher_preferences_kms_pq_tls_1_0_2019_06,
-    .kem_preferences = &kem_preferences_kms_pq_tls_1_0_2019_06,
+    .kem_preferences = &kem_preferences_null,
     .signature_preferences = &s2n_signature_preferences_20140601,
     .ecc_preferences = &s2n_ecc_preferences_20140601,
 };
@@ -356,23 +371,23 @@ const struct s2n_security_policy security_policy_kms_pq_tls_1_0_2019_06 = {
 const struct s2n_security_policy security_policy_kms_pq_tls_1_0_2020_02 = {
     .minimum_protocol_version = S2N_TLS10,
     .cipher_preferences = &cipher_preferences_kms_pq_tls_1_0_2020_02,
-    .kem_preferences = &kem_preferences_kms_pq_tls_1_0_2020_02,
+    .kem_preferences = &kem_preferences_null,
     .signature_preferences = &s2n_signature_preferences_20140601,
     .ecc_preferences = &s2n_ecc_preferences_20140601,
 };
 
 const struct s2n_security_policy security_policy_pq_sike_test_tls_1_0_2019_11 = {
-    .minimum_protocol_version = S2N_TLS10,  
+    .minimum_protocol_version = S2N_TLS10,
     .cipher_preferences = &cipher_preferences_pq_sike_test_tls_1_0_2019_11,
-    .kem_preferences = &kem_preferences_pq_sike_test_tls_1_0_2019_11,
+    .kem_preferences = &kem_preferences_null,
     .signature_preferences = &s2n_signature_preferences_20140601,
     .ecc_preferences = &s2n_ecc_preferences_20140601,
 };
 
 const struct s2n_security_policy security_policy_pq_sike_test_tls_1_0_2020_02 = {
-    .minimum_protocol_version = S2N_TLS10,  
+    .minimum_protocol_version = S2N_TLS10,
     .cipher_preferences = &cipher_preferences_pq_sike_test_tls_1_0_2020_02,
-    .kem_preferences = &kem_preferences_pq_sike_test_tls_1_0_2020_02,
+    .kem_preferences = &kem_preferences_null,
     .signature_preferences = &s2n_signature_preferences_20140601,
     .ecc_preferences = &s2n_ecc_preferences_20140601,
 };
@@ -380,17 +395,17 @@ const struct s2n_security_policy security_policy_pq_sike_test_tls_1_0_2020_02 = 
 const struct s2n_security_policy security_policy_kms_pq_tls_1_0_2020_07 = {
     .minimum_protocol_version = S2N_TLS10,
     .cipher_preferences = &cipher_preferences_kms_pq_tls_1_0_2020_07,
-    .kem_preferences = &kem_preferences_kms_pq_tls_1_0_2020_07,
+    .kem_preferences = &kem_preferences_pq_tls_1_0_2021_05,
     .signature_preferences = &s2n_signature_preferences_20140601,
     .ecc_preferences = &s2n_ecc_preferences_20140601,
 };
 
 const struct s2n_security_policy security_policy_pq_tls_1_0_2020_12 = {
-        .minimum_protocol_version = S2N_TLS10,
-        .cipher_preferences = &cipher_preferences_pq_tls_1_0_2020_12,
-        .kem_preferences = &kem_preferences_pq_tls_1_0_2020_12,
-        .signature_preferences = &s2n_signature_preferences_20200207,
-        .ecc_preferences = &s2n_ecc_preferences_20200310,
+    .minimum_protocol_version = S2N_TLS10,
+    .cipher_preferences = &cipher_preferences_pq_tls_1_0_2020_12,
+    .kem_preferences = &kem_preferences_pq_tls_1_0_2021_05,
+    .signature_preferences = &s2n_signature_preferences_20200207,
+    .ecc_preferences = &s2n_ecc_preferences_20200310,
 };
 
 const struct s2n_security_policy security_policy_pq_tls_1_1_2021_05_17 = {
@@ -419,8 +434,8 @@ const struct s2n_security_policy security_policy_pq_tls_1_0_2021_05_19 = {
 
 const struct s2n_security_policy security_policy_pq_tls_1_0_2021_05_20 = {
     .minimum_protocol_version = S2N_TLS10,
-    /* Yes, this is the same cipher_preferences as kms_pq_tls_1_0_2020_07. Both allow Kyber, BIKE, SIKE. The difference
-     * between these policies is the kem_preferences, which have been updated to prefer Round 3 over Round 2. */
+    /* Yes, this is the same cipher_preferences as kms_pq_tls_1_0_2020_07. The difference between these policies is
+     * the ecc_preferences, with this one adding support for x25519. */
     .cipher_preferences = &cipher_preferences_kms_pq_tls_1_0_2020_07,
     .kem_preferences = &kem_preferences_pq_tls_1_0_2021_05,
     .signature_preferences = &s2n_signature_preferences_20140601,
@@ -667,10 +682,23 @@ const struct s2n_security_policy security_policy_20210816_gcm = {
     .ecc_preferences = &s2n_ecc_preferences_20210816,
 };
 
+/*
+ * This security policy is derived from the following specification:
+ * https://datatracker.ietf.org/doc/html/rfc9151
+ */
+const struct s2n_security_policy security_policy_rfc9151 = {
+    .minimum_protocol_version = S2N_TLS12,
+    .cipher_preferences = &cipher_preferences_rfc9151,
+    .kem_preferences = &kem_preferences_null,
+    .signature_preferences = &s2n_signature_preferences_rfc9151,
+    .certificate_signature_preferences = &s2n_certificate_signature_preferences_rfc9151,
+    .ecc_preferences = &s2n_ecc_preferences_20210816,
+};
+
 const struct s2n_security_policy security_policy_test_all = {
     .minimum_protocol_version = S2N_SSLv3,
     .cipher_preferences = &cipher_preferences_test_all,
-    .kem_preferences = &kem_preferences_kms_pq_tls_1_0_2020_07,
+    .kem_preferences = &kem_preferences_pq_tls_1_0_2021_05,
     .signature_preferences = &s2n_signature_preferences_20201021,
     .ecc_preferences = &s2n_ecc_preferences_test_all,
 };
@@ -678,7 +706,7 @@ const struct s2n_security_policy security_policy_test_all = {
 const struct s2n_security_policy security_policy_test_all_tls12 = {
     .minimum_protocol_version = S2N_SSLv3,
     .cipher_preferences = &cipher_preferences_test_all_tls12,
-    .kem_preferences = &kem_preferences_kms_pq_tls_1_0_2020_07,
+    .kem_preferences = &kem_preferences_pq_tls_1_0_2021_05,
     .signature_preferences = &s2n_signature_preferences_20201021,
     .ecc_preferences = &s2n_ecc_preferences_20201021,
 };
@@ -734,7 +762,7 @@ const struct s2n_security_policy security_policy_null = {
 struct s2n_security_policy_selection security_policy_selection[] = {
     { .version="default", .security_policy=&security_policy_20170210, .ecc_extension_required=0, .pq_kem_extension_required=0 },
     { .version="default_tls13", .security_policy=&security_policy_default_tls13, .ecc_extension_required=0, .pq_kem_extension_required=0 },
-    { .version="default_fips", .security_policy=&security_policy_20170405, .ecc_extension_required=0, .pq_kem_extension_required=0 },
+    { .version="default_fips", .security_policy=&security_policy_default_fips, .ecc_extension_required=0, .pq_kem_extension_required=0 },
     { .version="ELBSecurityPolicy-TLS-1-0-2015-04", .security_policy=&security_policy_elb_2015_04, .ecc_extension_required=0, .pq_kem_extension_required=0 },
     /* Not a mistake. TLS-1-0-2015-05 and 2016-08 are equivalent */
     { .version="ELBSecurityPolicy-TLS-1-0-2015-05", .security_policy=&security_policy_elb_2016_08, .ecc_extension_required=0, .pq_kem_extension_required=0 },
@@ -743,9 +771,9 @@ struct s2n_security_policy_selection security_policy_selection[] = {
     { .version="ELBSecurityPolicy-TLS-1-2-2017-01", .security_policy=&security_policy_elb_tls_1_2_2017_01, .ecc_extension_required=0, .pq_kem_extension_required=0 },
     { .version="ELBSecurityPolicy-TLS-1-2-Ext-2018-06", .security_policy=&security_policy_elb_tls_1_2_ext_2018_06, .ecc_extension_required=0, .pq_kem_extension_required=0 },
     { .version="ELBSecurityPolicy-FS-2018-06", .security_policy=&security_policy_elb_fs_2018_06, .ecc_extension_required=0, .pq_kem_extension_required=0 },
-    { .version="ELBSecurityPolicy-FS-1-2-2019-08", .security_policy=&security_policy_elb_fs_1_2_2019_08, .ecc_extension_required=0, .pq_kem_extension_required=0 }, 
-    { .version="ELBSecurityPolicy-FS-1-1-2019-08", .security_policy=&security_policy_elb_fs_1_1_2019_08, .ecc_extension_required=0, .pq_kem_extension_required=0 }, 
-    { .version="ELBSecurityPolicy-FS-1-2-Res-2019-08", .security_policy=&security_policy_elb_fs_1_2_Res_2019_08, .ecc_extension_required=0, .pq_kem_extension_required=0 }, 
+    { .version="ELBSecurityPolicy-FS-1-2-2019-08", .security_policy=&security_policy_elb_fs_1_2_2019_08, .ecc_extension_required=0, .pq_kem_extension_required=0 },
+    { .version="ELBSecurityPolicy-FS-1-1-2019-08", .security_policy=&security_policy_elb_fs_1_1_2019_08, .ecc_extension_required=0, .pq_kem_extension_required=0 },
+    { .version="ELBSecurityPolicy-FS-1-2-Res-2019-08", .security_policy=&security_policy_elb_fs_1_2_Res_2019_08, .ecc_extension_required=0, .pq_kem_extension_required=0 },
     { .version="CloudFront-Upstream", .security_policy=&security_policy_cloudfront_upstream, .ecc_extension_required=0, .pq_kem_extension_required=0 },
     { .version="CloudFront-Upstream-TLS-1-0", .security_policy=&security_policy_cloudfront_upstream_tls10, .ecc_extension_required=0, .pq_kem_extension_required=0 },
     { .version="CloudFront-Upstream-TLS-1-1", .security_policy=&security_policy_cloudfront_upstream_tls11, .ecc_extension_required=0, .pq_kem_extension_required=0 },
@@ -819,6 +847,7 @@ struct s2n_security_policy_selection security_policy_selection[] = {
     { .version="20201021", .security_policy=&security_policy_20201021, .ecc_extension_required=0, .pq_kem_extension_required=0 },
     { .version="20210816", .security_policy=&security_policy_20210816, .ecc_extension_required=0, .pq_kem_extension_required=0 },
     { .version="20210816_GCM", .security_policy=&security_policy_20210816_gcm, .ecc_extension_required=0, .pq_kem_extension_required=0 },
+    { .version="rfc9151", .security_policy=&security_policy_rfc9151, .ecc_extension_required=0, .pq_kem_extension_required=0 },
     { .version="test_all", .security_policy=&security_policy_test_all, .ecc_extension_required=0, .pq_kem_extension_required=0 },
     { .version="test_all_fips", .security_policy=&security_policy_test_all_fips, .ecc_extension_required=0, .pq_kem_extension_required=0 },
     { .version="test_all_ecdsa", .security_policy=&security_policy_test_all_ecdsa, .ecc_extension_required=0, .pq_kem_extension_required=0 },
@@ -1013,7 +1042,8 @@ int s2n_connection_is_valid_for_cipher_preferences(struct s2n_connection *conn, 
 {
     POSIX_ENSURE_REF(conn);
     POSIX_ENSURE_REF(version);
-    POSIX_ENSURE_REF(conn->secure.cipher_suite);
+    POSIX_ENSURE_REF(conn->secure);
+    POSIX_ENSURE_REF(conn->secure->cipher_suite);
 
     const struct s2n_security_policy *security_policy = NULL;
     POSIX_GUARD(s2n_find_security_policy_from_version(version, &security_policy));
@@ -1024,7 +1054,7 @@ int s2n_connection_is_valid_for_cipher_preferences(struct s2n_connection *conn, 
         return 0;
     }
 
-    struct s2n_cipher_suite *cipher = conn->secure.cipher_suite;
+    struct s2n_cipher_suite *cipher = conn->secure->cipher_suite;
     POSIX_ENSURE_REF(cipher);
     for (int i = 0; i < security_policy->cipher_preferences->count; ++i) {
         if (0 == memcmp(security_policy->cipher_preferences->suites[i]->iana_value, cipher->iana_value, S2N_TLS_CIPHER_SUITE_LEN)) {
@@ -1069,7 +1099,10 @@ S2N_RESULT s2n_validate_certificate_signature_preferences(const struct s2n_signa
         }
     }
 
-    /* The Openssl function used to parse signatures off certificates does not differentiate between any rsa pss
+    /*
+     * https://github.com/aws/s2n-tls/issues/3435
+     *
+     * The Openssl function used to parse signatures off certificates does not differentiate between any rsa pss
      * signature schemes. Therefore a security policy with a certificate signatures preference list must include
      * all rsa_pss signature schemes. */
     RESULT_ENSURE(rsa_pss_scheme_count == NUM_RSA_PSS_SCHEMES || rsa_pss_scheme_count == 0, S2N_ERR_INVALID_SECURITY_POLICY);

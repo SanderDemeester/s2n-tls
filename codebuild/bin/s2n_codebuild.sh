@@ -66,27 +66,21 @@ if [[ -n "$S2N_NO_PQ" ]]; then
 fi
 
 # Run Multiple tests on one flag.
-if [[ "$TESTS" == "ALL" || "$TESTS" == "sawHMACPlus" ]] && [[ "$OS_NAME" == "linux" ]]; then make -C tests/saw tmp/verify_HMAC.log tmp/verify_drbg.log sike failure-tests; fi
+if [[ "$TESTS" == "ALL" || "$TESTS" == "sawHMACPlus" ]] && [[ "$OS_NAME" == "linux" ]]; then make -C tests/saw tmp/verify_HMAC.log tmp/verify_drbg.log failure-tests; fi
 
 # Run Individual tests
-if [[ "$TESTS" == "ALL" || "$TESTS" == "unit" ]]; then cmake . -Bbuild -DCMAKE_PREFIX_PATH=$LIBCRYPTO_ROOT -D${CMAKE_PQ_OPTION}; cmake --build ./build; make -C build test ARGS=-j$(nproc); fi
+if [[ "$TESTS" == "ALL" || "$TESTS" == "unit" ]]; then cmake . -Bbuild -DCMAKE_PREFIX_PATH=$LIBCRYPTO_ROOT -D${CMAKE_PQ_OPTION} -DBUILD_SHARED_LIBS=on; cmake --build ./build; make -C build test ARGS=-j$(nproc); fi
 if [[ "$TESTS" == "ALL" || "$TESTS" == "interning" ]]; then ./codebuild/bin/test_libcrypto_interning.sh; fi
 if [[ "$TESTS" == "ALL" || "$TESTS" == "asan" ]]; then make clean; S2N_ADDRESS_SANITIZER=1 make -j $JOBS ; fi
 if [[ "$TESTS" == "ALL" || "$TESTS" == "integration" ]]; then make clean; S2N_NO_SSLYZE=1 make integration ; fi
-if [[ "$TESTS" == "ALL" || "$TESTS" == "integrationv2" ]]; then make clean; make integrationv2 ; fi
+if [[ "$TESTS" == "ALL" || "$TESTS" == "integrationv2" ]]; then $CB_BIN_DIR/install_s2n_head.sh "$(mktemp -d)"; make clean; make integrationv2 ; fi
 if [[ "$TESTS" == "ALL" || "$TESTS" == "crt" ]]; then ./codebuild/bin/build_aws_crt_cpp.sh $(mktemp -d) $(mktemp -d); fi
+if [[ "$TESTS" == "ALL" || "$TESTS" == "sharedandstatic" ]]; then ./codebuild/bin/test_install_shared_and_static.sh $(mktemp -d); fi
+# Env must have S2N_USE_CRITERION set for the following to work
+if [[ "$TESTS" == "ALL" || "$TESTS" == "integrationv2crit" ]]; then make install; make -C bindings/rust ; make -C tests/integrationv2 "${INTEGV2_TEST}"; fi
 if [[ "$TESTS" == "ALL" || "$TESTS" == "fuzz" ]]; then (make clean && make fuzz) ; fi
 if [[ "$TESTS" == "ALL" || "$TESTS" == "benchmark" ]]; then (make clean && make benchmark) ; fi
 if [[ "$TESTS" == "sawHMAC" ]] && [[ "$OS_NAME" == "linux" ]]; then make -C tests/saw/ tmp/verify_HMAC.log ; fi
 if [[ "$TESTS" == "sawDRBG" ]]; then make -C tests/saw tmp/verify_drbg.log ; fi
 if [[ "$TESTS" == "ALL" || "$TESTS" == "tls" ]]; then make -C tests/saw tmp/verify_handshake.log ; fi
 if [[ "$TESTS" == "sawHMACFailure" ]]; then make -C tests/saw failure-tests ; fi
-# Below runs sike r_1 r_2 and x86
-if [[ "$TESTS" == "sawSIKE" ]]; then make -C tests/saw sike ; fi
-if [[ "$TESTS" == "ALL" || "$TESTS" == "sawBIKE" ]]; then make -C tests/saw bike ; fi
-
-# Generate *.gcov files that can be picked up by the CodeCov.io Bash helper script. Don't run lcov or genhtml
-# since those will delete .gcov files as they're processed.
-if [[ "$CODECOV_IO_UPLOAD" == "true" && "$FUZZ_COVERAGE" != "true" ]]; then
-    make run-gcov;
-fi

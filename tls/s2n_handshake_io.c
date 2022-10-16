@@ -62,7 +62,7 @@ static int s2n_always_fail_recv(struct s2n_connection *conn)
     POSIX_BAIL(S2N_ERR_HANDSHAKE_UNREACHABLE);
 }
 
-/* Client and Server handlers for each message type we support.  
+/* Client and Server handlers for each message type we support.
  * See http://www.iana.org/assignments/tls-parameters/tls-parameters.xhtml#tls-parameters-7 for the list of handshake message types
  */
 static struct s2n_handshake_action state_machine[] = {
@@ -811,6 +811,9 @@ static S2N_RESULT s2n_validate_ems_status(struct s2n_connection *conn)
 
 int s2n_conn_set_handshake_type(struct s2n_connection *conn)
 {
+    POSIX_ENSURE_REF(conn);
+    POSIX_ENSURE_REF(conn->secure);
+
     if (IS_TLS13_HANDSHAKE(conn)) {
         POSIX_GUARD_RESULT(s2n_conn_set_tls13_handshake_type(conn));
         return S2N_SUCCESS;
@@ -876,7 +879,7 @@ skip_cache_lookup:
     POSIX_GUARD_RESULT(s2n_handshake_type_set_flag(conn, FULL_HANDSHAKE));
 
     bool is_ephemeral = false;
-    POSIX_GUARD_RESULT(s2n_kex_is_ephemeral(conn->secure.cipher_suite->key_exchange_alg, &is_ephemeral));
+    POSIX_GUARD_RESULT(s2n_kex_is_ephemeral(conn->secure->cipher_suite->key_exchange_alg, &is_ephemeral));
     if (is_ephemeral) {
         POSIX_GUARD_RESULT(s2n_handshake_type_set_tls12_flag(conn, TLS12_PERFECT_FORWARD_SECRECY));
     }
@@ -1146,6 +1149,25 @@ static S2N_RESULT s2n_finish_read(struct s2n_connection *conn)
     return S2N_RESULT_OK;
 }
 
+static S2N_RESULT s2n_handshake_app_data_recv(struct s2n_connection *conn)
+{
+    if (conn->early_data_expected) {
+        RESULT_GUARD(s2n_early_data_validate_recv(conn));
+        RESULT_BAIL(S2N_ERR_EARLY_DATA_BLOCKED);
+    }
+
+    if (conn->handshake.renegotiation) {
+        RESULT_GUARD(s2n_renegotiate_validate(conn));
+        /* During renegotiation, Application Data may only be received until
+         * the server acknowledges the new handshake with a ServerHello.
+         */
+        RESULT_ENSURE(ACTIVE_MESSAGE(conn) == SERVER_HELLO, S2N_ERR_BAD_MESSAGE);
+        RESULT_BAIL(S2N_ERR_APP_DATA_BLOCKED);
+    }
+
+    RESULT_BAIL(S2N_ERR_BAD_MESSAGE);
+}
+
 /* Reading is a little more complicated than writing as the TLS RFCs allow content
  * types to be interleaved at the record layer. We may get an alert message
  * during the handshake phase, or messages of types that we don't support (e.g.
@@ -1201,9 +1223,7 @@ static int s2n_handshake_read_io(struct s2n_connection *conn)
      */
 
     if (record_type == TLS_APPLICATION_DATA) {
-        POSIX_ENSURE(conn->early_data_expected, S2N_ERR_BAD_MESSAGE);
-        POSIX_GUARD_RESULT(s2n_early_data_validate_recv(conn));
-        POSIX_BAIL(S2N_ERR_EARLY_DATA_BLOCKED);
+        POSIX_GUARD_RESULT(s2n_handshake_app_data_recv(conn));
     } else if (record_type == TLS_CHANGE_CIPHER_SPEC) {
         /* TLS1.3 can receive unexpected CCS messages at any point in the handshake
          * due to a peer operating in middlebox compatibility mode.
@@ -1286,7 +1306,7 @@ static int s2n_handshake_read_io(struct s2n_connection *conn)
          *# SHOULD be ignored by the client if it arrives in the middle of a handshake.
          */
         if (message_type == TLS_HELLO_REQUEST) {
-            POSIX_GUARD(s2n_client_hello_request_recv(conn));
+            POSIX_GUARD_RESULT(s2n_client_hello_request_validate(conn));
             POSIX_GUARD(s2n_stuffer_wipe(&conn->handshake.io));
             continue;
         }
@@ -1364,6 +1384,11 @@ int s2n_negotiate_impl(struct s2n_connection *conn, s2n_blocked_status *blocked)
 
         /* Flush any pending I/O or alert messages */
         POSIX_GUARD(s2n_flush(conn, blocked));
+
+        /* If the connection is closed, the handshake will never complete. */
+        if (conn->closed) {
+            POSIX_BAIL(S2N_ERR_CLOSED);
+        }
 
         /* If the handshake was paused, retry the current message */
         if (conn->handshake.paused) {
@@ -1447,7 +1472,13 @@ int s2n_negotiate(struct s2n_connection *conn, s2n_blocked_status *blocked)
     POSIX_ENSURE_REF(conn);
     POSIX_ENSURE(!conn->negotiate_in_use, S2N_ERR_REENTRANCY);
     conn->negotiate_in_use = true;
+
     int result = s2n_negotiate_impl(conn, blocked);
+
+    /* finish up sending and receiving */
+    POSIX_GUARD_RESULT(s2n_connection_dynamic_free_in_buffer(conn));
+    POSIX_GUARD_RESULT(s2n_connection_dynamic_free_out_buffer(conn));
+
     conn->negotiate_in_use = false;
     return result;
 }

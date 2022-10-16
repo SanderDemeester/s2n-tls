@@ -75,11 +75,12 @@ static int s2n_choose_sig_scheme(struct s2n_connection *conn, struct s2n_sig_sch
                           struct s2n_signature_scheme *chosen_scheme_out)
 {
     POSIX_ENSURE_REF(conn);
+    POSIX_ENSURE_REF(conn->secure);
     const struct s2n_signature_preferences *signature_preferences = NULL;
     POSIX_GUARD(s2n_connection_get_signature_preferences(conn, &signature_preferences));
     POSIX_ENSURE_REF(signature_preferences);
 
-    struct s2n_cipher_suite *cipher_suite = conn->secure.cipher_suite;
+    struct s2n_cipher_suite *cipher_suite = conn->secure->cipher_suite;
     POSIX_ENSURE_REF(cipher_suite);
 
     for (size_t i = 0; i < signature_preferences->count; i++) {
@@ -107,11 +108,13 @@ static int s2n_choose_sig_scheme(struct s2n_connection *conn, struct s2n_sig_sch
 int s2n_tls13_default_sig_scheme(struct s2n_connection *conn, struct s2n_signature_scheme *chosen_scheme_out)
 {
     POSIX_ENSURE_REF(conn);
+    POSIX_ENSURE_REF(conn->secure);
+
     const struct s2n_signature_preferences *signature_preferences = NULL;
     POSIX_GUARD(s2n_connection_get_signature_preferences(conn, &signature_preferences));
     POSIX_ENSURE_REF(signature_preferences);
 
-    struct s2n_cipher_suite *cipher_suite = conn->secure.cipher_suite;
+    struct s2n_cipher_suite *cipher_suite = conn->secure->cipher_suite;
     POSIX_ENSURE_REF(cipher_suite);
 
     for (size_t i = 0; i < signature_preferences->count; i++) {
@@ -171,28 +174,26 @@ int s2n_get_and_validate_negotiated_signature_scheme(struct s2n_connection *conn
 int s2n_choose_default_sig_scheme(struct s2n_connection *conn, struct s2n_signature_scheme *sig_scheme_out, s2n_mode signer)
 {
     POSIX_ENSURE_REF(conn);
+    POSIX_ENSURE_REF(conn->secure);
     POSIX_ENSURE_REF(sig_scheme_out);
 
     s2n_authentication_method auth_method = 0;
     if (signer == S2N_CLIENT) {
         POSIX_GUARD(s2n_get_auth_method_for_cert_type(conn->handshake_params.client_cert_pkey_type, &auth_method));
     } else {
-        POSIX_ENSURE_REF(conn->secure.cipher_suite);
-        auth_method = conn->secure.cipher_suite->auth_method;
+        POSIX_ENSURE_REF(conn->secure->cipher_suite);
+        auth_method = conn->secure->cipher_suite->auth_method;
     }
 
-    /* Default our signature digest algorithms. For TLS 1.2 this default is different and may be
-     * overridden by the signature_algorithms extension. If the server chooses an ECDHE_ECDSA
-     * cipher suite, this will be overridden to SHA1.
+    /* Default our signature digest algorithms.
+     * For >=TLS 1.2 this default may be overridden by the signature_algorithms extension.
      */
-    *sig_scheme_out = s2n_rsa_pkcs1_md5_sha1;
-
     if (auth_method == S2N_AUTHENTICATION_ECDSA) {
         *sig_scheme_out = s2n_ecdsa_sha1;
     } else if (conn->actual_protocol_version >= S2N_TLS12) {
         *sig_scheme_out = s2n_rsa_pkcs1_sha1;
-    } else if (s2n_is_in_fips_mode() && signer == S2N_SERVER) {
-        *sig_scheme_out = s2n_rsa_pkcs1_sha1;
+    } else {
+        *sig_scheme_out = s2n_rsa_pkcs1_md5_sha1;
     }
 
     return S2N_SUCCESS;
@@ -213,7 +214,7 @@ int s2n_choose_sig_scheme_from_peer_preference_list(struct s2n_connection *conn,
     }
 
     /* SignatureScheme preference list was first added in TLS 1.2. It will be empty in older TLS versions. */
-    if (peer_wire_prefs != NULL && peer_wire_prefs->len > 0) {
+    if (conn->actual_protocol_version >= S2N_TLS12 && peer_wire_prefs != NULL && peer_wire_prefs->len > 0) {
         /* Use a best effort approach to selecting a signature scheme matching client's preferences */
         POSIX_GUARD(s2n_choose_sig_scheme(conn, peer_wire_prefs, &chosen_scheme));
     }

@@ -102,8 +102,8 @@ int main(int argc, char **argv)
                 0xFF, 0x00, /* extension type */
                 0x00, 0x02, /* extension payload length */
                 0xAB, 0xCD, /* extension payload */
-                /* NPN extension without data */
-                0x33, 0x74,
+                /* Encrypt then mac extension without data */
+                0x00, 0x16,
                 0x00, 0x00
         };
 
@@ -113,7 +113,7 @@ int main(int argc, char **argv)
 
         /* Succeeds on an unsupported extension with no payload */
         bool exists = false;
-        EXPECT_SUCCESS(s2n_client_hello_has_extension(&conn->client_hello, 0x3374, &exists));
+        EXPECT_SUCCESS(s2n_client_hello_has_extension(&conn->client_hello, 0x0016, &exists));
         EXPECT_TRUE(exists);
 
         /* Succeeds on an unsupported extension with payload */
@@ -429,7 +429,14 @@ int main(int argc, char **argv)
             EXPECT_SUCCESS(s2n_disable_tls13_in_test());
         }
 
-        /* TLS_EMPTY_RENEGOTIATION_INFO_SCSV only included if TLS1.2 ciphers included */
+        /* TLS_EMPTY_RENEGOTIATION_INFO_SCSV included if TLS1.2 ciphers included
+         *
+         *= https://tools.ietf.org/rfc/rfc5746#3.4
+         *= type=test
+         *# o  The client MUST include either an empty "renegotiation_info"
+         *#    extension, or the TLS_EMPTY_RENEGOTIATION_INFO_SCSV signaling
+         *#    cipher suite value in the ClientHello.
+         */
         if (s2n_is_tls13_fully_supported()) {
             EXPECT_SUCCESS(s2n_reset_tls13_in_test());
             const uint8_t empty_renegotiation_info_scsv[S2N_TLS_CIPHER_SUITE_LEN] = { TLS_EMPTY_RENEGOTIATION_INFO_SCSV };
@@ -688,6 +695,8 @@ int main(int argc, char **argv)
 
         EXPECT_NOT_NULL(server_config = s2n_config_new());
         EXPECT_SUCCESS(s2n_config_add_cert_chain_and_key_to_store(server_config, chain_and_key));
+        /* Security policy must support SSLv2 */
+        EXPECT_SUCCESS(s2n_config_set_cipher_preferences(server_config, "test_all"));
         EXPECT_SUCCESS(s2n_connection_set_config(server_conn, server_config));
 
         /* Send the client hello message */
@@ -697,15 +706,15 @@ int main(int argc, char **argv)
         /* Verify that the sent client hello message is accepted */
         s2n_negotiate(server_conn, &server_blocked);
         EXPECT_TRUE(s2n_conn_get_current_message_type(server_conn) > CLIENT_HELLO);
-        EXPECT_EQUAL(server_conn->handshake.handshake_type, NEGOTIATED | FULL_HANDSHAKE);
+        EXPECT_TRUE(IS_NEGOTIATED(server_conn));
 
         struct s2n_client_hello *client_hello = s2n_connection_get_client_hello(server_conn);
 
         /* Verify s2n_connection_get_client_hello returns the handle to the s2n_client_hello on the connection */
         EXPECT_EQUAL(client_hello, &server_conn->client_hello);
 
-        uint8_t *collected_client_hello = client_hello->raw_message.blob.data;
-        uint16_t collected_client_hello_len = client_hello->raw_message.blob.size;
+        uint8_t *collected_client_hello = client_hello->raw_message.data;
+        uint16_t collected_client_hello_len = client_hello->raw_message.size;
 
         /* Verify collected client hello message length */
         EXPECT_EQUAL(collected_client_hello_len, sslv2_client_hello_len);
@@ -744,8 +753,8 @@ int main(int argc, char **argv)
         EXPECT_SUCCESS(s2n_connection_free_handshake(server_conn));
 
         /* Verify free_handshake resized the s2n_client_hello.raw_message stuffer back to 0 */
-        EXPECT_NULL(client_hello->raw_message.blob.data);
-        EXPECT_EQUAL(client_hello->raw_message.blob.size, 0);
+        EXPECT_NULL(client_hello->raw_message.data);
+        EXPECT_EQUAL(client_hello->raw_message.size, 0);
 
         /* Not a real tls client but make sure we block on its close_notify */
         int shutdown_rc = s2n_shutdown(server_conn, &server_blocked);
@@ -757,8 +766,8 @@ int main(int argc, char **argv)
         EXPECT_SUCCESS(s2n_connection_wipe(server_conn));
 
         /* Verify connection_wipe resized the s2n_client_hello.raw_message stuffer back to 0 */
-        EXPECT_NULL(client_hello->raw_message.blob.data);
-        EXPECT_EQUAL(client_hello->raw_message.blob.size, 0);
+        EXPECT_NULL(client_hello->raw_message.data);
+        EXPECT_EQUAL(client_hello->raw_message.size, 0);
 
         /* Verify the s2n blobs referencing cipher_suites and extensions have cleared */
         EXPECT_EQUAL(client_hello->cipher_suites.size, 0);
@@ -858,6 +867,8 @@ int main(int argc, char **argv)
         server_conn->actual_protocol_version = S2N_TLS12;
         server_conn->server_protocol_version = S2N_TLS12;
         server_conn->client_protocol_version = S2N_TLS12;
+        /* Security policy must allow cipher suite hard coded into client hello */
+        EXPECT_SUCCESS(s2n_connection_set_cipher_preferences(server_conn, "test_all"));
         EXPECT_SUCCESS(s2n_connection_set_io_pair(server_conn, &io_pair));
 
         EXPECT_NOT_NULL(server_config = s2n_config_new());
@@ -890,8 +901,8 @@ int main(int argc, char **argv)
         /* Verify s2n_connection_get_client_hello returns the handle to the s2n_client_hello on the connection */
         EXPECT_EQUAL(client_hello, &server_conn->client_hello);
 
-        uint8_t *collected_client_hello = client_hello->raw_message.blob.data;
-        uint16_t collected_client_hello_len = client_hello->raw_message.blob.size;
+        uint8_t *collected_client_hello = client_hello->raw_message.data;
+        uint16_t collected_client_hello_len = client_hello->raw_message.size;
 
         /* Verify collected client hello message length */
         EXPECT_EQUAL(collected_client_hello_len, sent_client_hello_len);
@@ -1044,8 +1055,8 @@ int main(int argc, char **argv)
         EXPECT_SUCCESS(s2n_connection_free_handshake(server_conn));
 
         /* Verify free_handshake resized the s2n_client_hello.raw_message stuffer back to 0 */
-        EXPECT_NULL(client_hello->raw_message.blob.data);
-        EXPECT_EQUAL(client_hello->raw_message.blob.size, 0);
+        EXPECT_NULL(client_hello->raw_message.data);
+        EXPECT_EQUAL(client_hello->raw_message.size, 0);
 
         /* Not a real tls client but make sure we block on its close_notify */
         int shutdown_rc = s2n_shutdown(server_conn, &server_blocked);
@@ -1057,8 +1068,8 @@ int main(int argc, char **argv)
         EXPECT_SUCCESS(s2n_connection_wipe(server_conn));
 
         /* Verify connection_wipe resized the s2n_client_hello.raw_message stuffer back to 0 */
-        EXPECT_NULL(client_hello->raw_message.blob.data);
-        EXPECT_EQUAL(client_hello->raw_message.blob.size, 0);
+        EXPECT_NULL(client_hello->raw_message.data);
+        EXPECT_EQUAL(client_hello->raw_message.size, 0);
 
         /* Verify the s2n blobs referencing cipher_suites and extensions have cleared */
         EXPECT_EQUAL(client_hello->cipher_suites.size, 0);
@@ -1072,6 +1083,8 @@ int main(int argc, char **argv)
         server_conn->actual_protocol_version = S2N_TLS12;
         server_conn->server_protocol_version = S2N_TLS12;
         server_conn->client_protocol_version = S2N_TLS12;
+        /* Security policy must allow cipher suite hard coded into client hello */
+        EXPECT_SUCCESS(s2n_connection_set_cipher_preferences(server_conn, "test_all"));
         EXPECT_SUCCESS(s2n_connection_set_io_pair(server_conn, &io_pair));
 
         /* Recreate config */
@@ -1092,7 +1105,7 @@ int main(int argc, char **argv)
 
         /* Verify the collected client hello on the reused connection matches the expected client hello */
         client_hello = s2n_connection_get_client_hello(server_conn);
-        collected_client_hello = client_hello->raw_message.blob.data;
+        collected_client_hello = client_hello->raw_message.data;
         EXPECT_BYTEARRAY_EQUAL(collected_client_hello, expected_client_hello, sent_client_hello_len);
 
         /* Not a real tls client but make sure we block on its close_notify */
@@ -1201,6 +1214,8 @@ int main(int argc, char **argv)
         EXPECT_SUCCESS(s2n_io_pair_init_non_blocking(&io_pair));
 
         EXPECT_NOT_NULL(server_conn = s2n_connection_new(S2N_SERVER));
+        /* Security policy must allow cipher suite hard coded into client hello */
+        EXPECT_SUCCESS(s2n_connection_set_cipher_preferences(server_conn, "test_all"));
         EXPECT_SUCCESS(s2n_connection_set_io_pair(server_conn, &io_pair));
 
         EXPECT_NOT_NULL(server_config = s2n_config_new());
@@ -1299,8 +1314,8 @@ int main(int argc, char **argv)
 
         EXPECT_SUCCESS(s2n_negotiate_test_server_and_client(server_conn, client_conn));
 
-        EXPECT_EQUAL(server_conn->secure.cipher_suite, &s2n_ecdhe_ecdsa_with_aes_128_cbc_sha);
-        EXPECT_EQUAL(client_conn->secure.cipher_suite, &s2n_ecdhe_ecdsa_with_aes_128_cbc_sha);
+        EXPECT_EQUAL(server_conn->secure->cipher_suite, &s2n_ecdhe_ecdsa_with_aes_128_cbc_sha);
+        EXPECT_EQUAL(client_conn->secure->cipher_suite, &s2n_ecdhe_ecdsa_with_aes_128_cbc_sha);
         EXPECT_EQUAL(server_conn->handshake_params.conn_sig_scheme.sig_alg, S2N_SIGNATURE_ECDSA);
         EXPECT_EQUAL(server_conn->handshake_params.conn_sig_scheme.hash_alg, S2N_HASH_SHA1);
         EXPECT_EQUAL(client_conn->handshake_params.conn_sig_scheme.sig_alg, S2N_SIGNATURE_ECDSA);
@@ -1315,6 +1330,24 @@ int main(int argc, char **argv)
         EXPECT_SUCCESS(s2n_config_free(client_config));
     }
 
+    /* s2n_client_hello_recv should fail when reading an SSLv2 client hello during a hello retry handshake */
+    {
+        DEFER_CLEANUP(struct s2n_connection *server_conn = s2n_connection_new(S2N_SERVER),
+            s2n_connection_ptr_free);
+        EXPECT_NOT_NULL(server_conn);
+
+        /* Handshake is hello retry and TLS1.3 was negotiated */
+        EXPECT_OK(s2n_handshake_type_set_flag(server_conn, HELLO_RETRY_REQUEST));
+        server_conn->actual_protocol_version = S2N_TLS13;
+
+        /* Second client hello has version SSLv2 */
+        server_conn->client_hello_version = S2N_SSLv2;
+
+        /* Mock having some data in the client hello */
+        EXPECT_SUCCESS(s2n_stuffer_write_uint16(&server_conn->handshake.io, 100));
+
+        EXPECT_FAILURE_WITH_ERRNO(s2n_parse_client_hello(server_conn), S2N_ERR_SAFETY);
+    }
 
     EXPECT_SUCCESS(s2n_cert_chain_and_key_free(chain_and_key));
     EXPECT_SUCCESS(s2n_cert_chain_and_key_free(ecdsa_chain_and_key));

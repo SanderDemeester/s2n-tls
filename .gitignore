@@ -14,6 +14,7 @@
 *.tmp
 *.pyc
 coverage/html/*
+docs/doxygen/output/
 libcrypto-build/*
 libcrypto-root
 libcrypto-root/*
@@ -36,3 +37,4 @@ CMakeCache.txt
 CMakeFiles/*
 .project
 ./codebuild/spec/buildspec_*_batch.yml
+build/

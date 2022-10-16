@@ -19,6 +19,7 @@
 #include "crypto/s2n_certificate.h"
 #include "crypto/s2n_dhe.h"
 #include "tls/s2n_psk.h"
+#include "tls/s2n_renegotiate.h"
 #include "tls/s2n_resume.h"
 #include "tls/s2n_x509_validator.h"
 #include "utils/s2n_blob.h"
@@ -29,6 +30,12 @@
 
 struct s2n_cipher_preferences;
 
+typedef enum {
+    S2N_NOT_OWNED = 0,
+    S2N_APP_OWNED,
+    S2N_LIB_OWNED,
+} s2n_cert_ownership;
+
 struct s2n_config {
     unsigned use_tickets:1;
 
@@ -36,7 +43,6 @@ struct s2n_config {
      * See s2n_quic_support.h */
     unsigned quic_enabled:1;
 
-    unsigned cert_allocated:1;
     unsigned default_certs_are_explicit:1;
     unsigned use_session_cache:1;
     /* if this is FALSE, server will ignore client's Maximum Fragment Length request */
@@ -61,6 +67,14 @@ struct s2n_config {
      * Note: This defaults to false to ensure backwards compatibility.
      */
     unsigned client_hello_cb_enable_poll:1;
+    /*
+     * Whether to verify signatures locally before sending them over the wire.
+     * See s2n_config_set_verify_after_sign.
+     */
+    unsigned verify_after_sign:1;
+
+    /* Indicates support for the npn extension */
+    unsigned npn_supported:1;
 
     struct s2n_dh_params *dhparams;
     /* Needed until we can deprecate s2n_config_add_cert_chain_and_key. This is
@@ -142,6 +156,14 @@ struct s2n_config {
 
     /* The user defined context associated with config */
     void *context;
+
+    s2n_cert_ownership cert_ownership;
+
+    /* Used to override the stuffer size for a connection's `out` stuffer. */
+    uint32_t send_buffer_size_override;
+
+    void *renegotiate_request_ctx;
+    s2n_renegotiate_request_cb renegotiate_request_cb;
 };
 
 S2N_CLEANUP_RESULT s2n_config_ptr_free(struct s2n_config **config);

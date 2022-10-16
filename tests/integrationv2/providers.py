@@ -2,7 +2,13 @@ import pytest
 import threading
 
 from common import ProviderOptions, Ciphers, Curves, Protocols, Certificates, Signatures
-from global_flags import get_flag, S2N_PROVIDER_VERSION
+from global_flags import get_flag, S2N_PROVIDER_VERSION, S2N_FIPS_MODE
+
+
+TLS_13_LIBCRYPTOS = {
+    "awslc",
+    "openssl-1.1.1"
+}
 
 
 class Provider(object):
@@ -98,6 +104,7 @@ class Tcpdump(Provider):
     This class still follows the provider setup, but all values are hardcoded
     because this isn't expected to be used outside of the dynamic record test.
     """
+
     def __init__(self, options: ProviderOptions):
         Provider.__init__(self, options)
 
@@ -106,22 +113,22 @@ class Tcpdump(Provider):
         tcpdump_filter = "dst port {}".format(self.options.port)
 
         cmd_line = ["tcpdump",
-            # Line buffer the output
-            "-l",
+                    # Line buffer the output
+                    "-l",
 
-            # Only read 10 packets before exiting. This is enough to find a large
-            # packet, and still exit before the timeout.
-            "-c", "10",
+                    # Only read 10 packets before exiting. This is enough to find a large
+                    # packet, and still exit before the timeout.
+                    "-c", "10",
 
-            # Watch the loopback device
-            "-i", "lo",
+                    # Watch the loopback device
+                    "-i", "lo",
 
-            # Don't resolve IP addresses
-            "-nn",
+                    # Don't resolve IP addresses
+                    "-nn",
 
-            # Set the buffer size to 1k
-            "-B", "1024",
-            tcpdump_filter]
+                    # Set the buffer size to 1k
+                    "-B", "1024",
+                    tcpdump_filter]
 
         return cmd_line
 
@@ -130,6 +137,7 @@ class S2N(Provider):
     """
     The S2N provider translates flags into s2nc/s2nd command line arguments.
     """
+
     def __init__(self, options: ProviderOptions):
         Provider.__init__(self, options)
 
@@ -141,15 +149,42 @@ class S2N(Provider):
 
     @classmethod
     def supports_protocol(cls, protocol, with_cert=None):
-        # If s2n is built with OpenSSL 1.0.2 it can't connect to itself
-        if protocol is Protocols.TLS13 and 'openssl-1.0.2' in OpenSSL.get_version():
-            if with_cert is not None and with_cert.algorithm != 'EC':
-                return False
+        # Disable TLS 1.3 tests for all libcryptos that don't support 1.3
+        if all([
+            libcrypto not in get_flag(S2N_PROVIDER_VERSION)
+            for libcrypto in TLS_13_LIBCRYPTOS
+        ]) and protocol == Protocols.TLS13:
+            return False
 
         return True
 
     @classmethod
     def supports_cipher(cls, cipher, with_curve=None):
+        # Disable chacha20 tests in unsupported libcryptos
+        if any([
+            libcrypto in get_flag(S2N_PROVIDER_VERSION)
+            for libcrypto in [
+                "openssl-1.0.2",
+                "libressl"
+            ]
+        ]) and "CHACHA20" in cipher.name:
+            return False
+
+        return True
+
+    @classmethod
+    def supports_signature(cls, signature):
+        # Disable RSA_PSS_RSAE_SHA256 in unsupported libcryptos
+        if any([
+            libcrypto in get_flag(S2N_PROVIDER_VERSION)
+            for libcrypto in [
+                "openssl-1.0.2",
+                "libressl",
+                "boringssl"
+            ]
+        ]) and signature == Signatures.RSA_PSS_RSAE_SHA256:
+            return False
+
         return True
 
     def setup_client(self):
@@ -196,6 +231,9 @@ class S2N(Provider):
                 cmd_line.extend(['--key', self.options.key])
             if self.options.cert:
                 cmd_line.extend(['--cert', self.options.cert])
+
+        if get_flag(S2N_FIPS_MODE):
+            cmd_line.append("--enter-fips-mode")
 
         if self.options.enable_client_ocsp:
             cmd_line.extend(["--status"])
@@ -253,7 +291,11 @@ class S2N(Provider):
             cmd_line.append('-T')
 
         if self.options.reconnects_before_exit is not None:
-            cmd_line.append('--max-conns={}'.format(self.options.reconnects_before_exit))
+            cmd_line.append(
+                '--max-conns={}'.format(self.options.reconnects_before_exit))
+
+        if get_flag(S2N_FIPS_MODE):
+            cmd_line.append("--enter-fips-mode")
 
         if self.options.ocsp_response is not None:
             cmd_line.extend(["--ocsp", self.options.ocsp_response])
@@ -301,10 +343,12 @@ class OpenSSL(Provider):
             # In the case of a cipher list we need to be sure TLS13 specific ciphers aren't
             # mixed with ciphers from previous versions
             is_tls13_or_above = (cipher[0].min_version >= Protocols.TLS13)
-            mismatch = [c for c in cipher if (c.min_version >= Protocols.TLS13) != is_tls13_or_above]
+            mismatch = [c for c in cipher if (
+                c.min_version >= Protocols.TLS13) != is_tls13_or_above]
 
             if len(mismatch) > 0:
-                raise Exception("Cannot combine ciphers for TLS1.3 or above with older ciphers: {}".format([c.name for c in cipher]))
+                raise Exception("Cannot combine ciphers for TLS1.3 or above with older ciphers: {}".format(
+                    [c.name for c in cipher]))
 
             ciphers.append(self._join_ciphers(cipher))
         else:
@@ -324,29 +368,11 @@ class OpenSSL(Provider):
 
     @classmethod
     def supports_protocol(cls, protocol, with_cert=None):
-        if protocol is Protocols.TLS13:
-            if 'openssl-1.1.1' in OpenSSL.get_version():
-                return True
-            else:
-                return False
-
         return True
 
     @classmethod
     def supports_cipher(cls, cipher, with_curve=None):
-        is_openssl_111 = "openssl-1.1.1" in OpenSSL.get_version()
-        if is_openssl_111 and cipher.openssl1_1_1 is False:
-            return False
-
-        if not is_openssl_111:
-            # OpenSSL 1.0.2 does not have ChaChaPoly
-            if 'CHACHA20' in cipher.name:
-                return False
-
-        if cipher.fips is False and "fips" in OpenSSL.get_version():
-            return False
-
-        if "openssl-1.0.2" in OpenSSL.get_version() and with_curve is not None:
+        if "openssl-1.0.2" in get_flag(S2N_PROVIDER_VERSION) and with_curve is not None:
             invalid_ciphers = [
                 Ciphers.ECDHE_RSA_AES128_SHA,
                 Ciphers.ECDHE_RSA_AES256_SHA,
@@ -365,7 +391,8 @@ class OpenSSL(Provider):
 
     def setup_client(self):
         cmd_line = ['openssl', 's_client']
-        cmd_line.extend(['-connect', '{}:{}'.format(self.options.host, self.options.port)])
+        cmd_line.extend(
+            ['-connect', '{}:{}'.format(self.options.host, self.options.port)])
 
         # Additional debugging that will be captured incase of failure
         cmd_line.extend(['-debug', '-tlsextdebug', '-state'])
@@ -411,7 +438,8 @@ class OpenSSL(Provider):
             cmd_line.append("-status")
 
         if self.options.signature_algorithm is not None:
-            cmd_line.extend(["-sigalgs", self.options.signature_algorithm.name])
+            cmd_line.extend(
+                ["-sigalgs", self.options.signature_algorithm.name])
 
         if self.options.record_size is not None:
             cmd_line.extend(["-max_send_frag", str(self.options.record_size)])
@@ -430,7 +458,8 @@ class OpenSSL(Provider):
 
         if self.options.reconnects_before_exit is not None:
             # If the user request a specific reconnection count, set it here
-            cmd_line.extend(['-naccept', str(self.options.reconnects_before_exit)])
+            cmd_line.extend(
+                ['-naccept', str(self.options.reconnects_before_exit)])
         else:
             # Exit after the first connection by default
             cmd_line.extend(['-naccept', '1'])
@@ -469,7 +498,8 @@ class OpenSSL(Provider):
             cmd_line.extend(["-status_file", self.options.ocsp_response])
 
         if self.options.signature_algorithm is not None:
-            cmd_line.extend(["-sigalgs", self.options.signature_algorithm.name])
+            cmd_line.extend(
+                ["-sigalgs", self.options.signature_algorithm.name])
 
         if self.options.extra_flags is not None:
             cmd_line.extend(self.options.extra_flags)
@@ -482,6 +512,7 @@ class JavaSSL(Provider):
     NOTE: Only a Java SSL client has been set up. The server has not been 
     implemented yet.
     """
+
     def __init__(self, options: ProviderOptions):
         Provider.__init__(self, options)
 
@@ -498,7 +529,7 @@ class JavaSSL(Provider):
 
     @classmethod
     def supports_cipher(cls, cipher, with_curve=None):
-        # Java SSL does not support CHACHA20 
+        # Java SSL does not support CHACHA20
         if 'CHACHA20' in cipher.name:
             return False
 
@@ -536,6 +567,7 @@ class BoringSSL(Provider):
     is not yet supported. The client works, the server has not yet been
     implemented, neither are in the default configuration.
     """
+
     def __init__(self, options: ProviderOptions):
         Provider.__init__(self, options)
 
@@ -548,18 +580,22 @@ class BoringSSL(Provider):
 
     def setup_client(self):
         cmd_line = ['bssl', 's_client']
-        cmd_line.extend(['-connect', '{}:{}'.format(self.options.host, self.options.port)])
+        cmd_line.extend(
+            ['-connect', '{}:{}'.format(self.options.host, self.options.port)])
         if self.options.cert is not None:
             cmd_line.extend(['-cert', self.options.cert])
         if self.options.key is not None:
             cmd_line.extend(['-key', self.options.key])
         if self.options.cipher is not None:
             if self.options.cipher == Ciphersuites.TLS_CHACHA20_POLY1305_SHA256:
-                cmd_line.extend(['-cipher', 'TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256'])
+                cmd_line.extend(
+                    ['-cipher', 'TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256'])
             elif self.options.cipher == Ciphersuites.TLS_AES_128_GCM_256:
-                pytest.skip('BoringSSL does not support Cipher {}'.format(self.options.cipher))
+                pytest.skip('BoringSSL does not support Cipher {}'.format(
+                    self.options.cipher))
             elif self.options.cipher == Ciphersuites.TLS_AES_256_GCM_384:
-                pytest.skip('BoringSSL does not support Cipher {}'.format(self.options.cipher))
+                pytest.skip('BoringSSL does not support Cipher {}'.format(
+                    self.options.cipher))
         if self.options.curve is not None:
             if self.options.curve == Curves.P256:
                 cmd_line.extend(['-curves', 'P-256'])
@@ -568,7 +604,8 @@ class BoringSSL(Provider):
             elif self.options.curve == Curves.P521:
                 cmd_line.extend(['-curves', 'P-521'])
             elif self.options.curve == Curves.X25519:
-                pytest.skip('BoringSSL does not support curve {}'.format(self.options.curve))
+                pytest.skip('BoringSSL does not support curve {}'.format(
+                    self.options.curve))
 
         # Clients are always ready to connect
         self.set_provider_ready()
@@ -652,22 +689,26 @@ class GnuTLS(Provider):
         priority_str = "NONE"
 
         if self.options.protocol:
-            priority_str += ":+" + self.protocol_to_priority_str(self.options.protocol)
+            priority_str += ":+" + \
+                self.protocol_to_priority_str(self.options.protocol)
         else:
             priority_str += ":+VERS-ALL"
 
         if self.options.cipher:
-            priority_str += ":+" + self.cipher_to_priority_str(self.options.cipher)
+            priority_str += ":+" + \
+                self.cipher_to_priority_str(self.options.cipher)
         else:
             priority_str += ":+KX-ALL:+CIPHER-ALL:+MAC-ALL"
 
         if self.options.curve:
-            priority_str += ":+" + self.curve_to_priority_str(self.options.curve)
+            priority_str += ":+" + \
+                self.curve_to_priority_str(self.options.curve)
         else:
             priority_str += ":+GROUP-ALL"
 
         if self.options.signature_algorithm:
-            priority_str += ":+" + self.sigalg_to_priority_str(self.options.signature_algorithm)
+            priority_str += ":+" + \
+                self.sigalg_to_priority_str(self.options.signature_algorithm)
         else:
             priority_str += ":+SIGN-ALL"
 

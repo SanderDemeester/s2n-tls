@@ -478,6 +478,7 @@ static S2N_RESULT s2n_psk_write_binder_list(struct s2n_connection *conn, const s
 {
     RESULT_ENSURE_REF(conn);
     RESULT_ENSURE_REF(partial_client_hello);
+    RESULT_ENSURE_REF(conn->secure);
 
     struct s2n_psk_parameters *psk_params = &conn->psk_params;
     struct s2n_array *psk_list = &psk_params->psk_list;
@@ -504,7 +505,7 @@ static S2N_RESULT s2n_psk_write_binder_list(struct s2n_connection *conn, const s
          *# compute partial hash transcripts for multiple hashes in the second
          *# ClientHello.
          */
-        if (s2n_is_hello_retry_handshake(conn) && conn->secure.cipher_suite->prf_alg != psk->hmac_alg) {
+        if (s2n_is_hello_retry_handshake(conn) && conn->secure->cipher_suite->prf_alg != psk->hmac_alg) {
             continue;
         }
 
@@ -549,6 +550,12 @@ S2N_RESULT s2n_finish_psk_extension(struct s2n_connection *conn)
             s2n_stuffer_data_available(client_hello)));
 
     RESULT_GUARD(s2n_psk_write_binder_list(conn, &partial_client_hello, client_hello));
+
+    /* Reset binder list size.
+     * This is important because the psk extension can be removed during a retry.
+     */
+    conn->psk_params.binder_list_size = 0;
+
     return S2N_RESULT_OK;
 }
 

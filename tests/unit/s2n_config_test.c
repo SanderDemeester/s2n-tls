@@ -31,6 +31,11 @@ static int s2n_test_select_psk_identity_callback(struct s2n_connection *conn, vo
     return S2N_SUCCESS;
 }
 
+static int s2n_test_reneg_req_cb(struct s2n_connection *conn, void *context, s2n_renegotiate_response *response)
+{
+    return S2N_SUCCESS;
+}
+
 int main(int argc, char **argv)
 {
     BEGIN_TEST();
@@ -40,6 +45,11 @@ int main(int argc, char **argv)
     EXPECT_SUCCESS(s2n_find_security_policy_from_version("default_tls13", &tls13_security_policy));
     EXPECT_SUCCESS(s2n_find_security_policy_from_version("default_fips", &fips_security_policy));
     EXPECT_SUCCESS(s2n_find_security_policy_from_version("default", &default_security_policy));
+
+    char cert[S2N_MAX_TEST_PEM_SIZE] = { 0 };
+    EXPECT_SUCCESS(s2n_read_test_pem(S2N_DEFAULT_TEST_CERT_CHAIN, cert, S2N_MAX_TEST_PEM_SIZE));
+    char key[S2N_MAX_TEST_PEM_SIZE] = { 0 };
+    EXPECT_SUCCESS(s2n_read_test_pem(S2N_DEFAULT_TEST_PRIVATE_KEY, key, S2N_MAX_TEST_PEM_SIZE));
 
     /* Test: s2n_config_new and tls13_default_config match */
     {
@@ -272,6 +282,263 @@ int main(int argc, char **argv)
         EXPECT_NOT_EQUAL(*((uint8_t *)returned_context), other);
 
         EXPECT_SUCCESS(s2n_config_free(config));
+    }
+
+    /* Test s2n_config_set_extension_data */
+    {
+        uint8_t extension_data[] = "extension data";
+
+        /* Test s2n_config_set_extension_data can be called for owned cert chains */
+        {
+            DEFER_CLEANUP(struct s2n_config *config = s2n_config_new(), s2n_config_ptr_free);
+            EXPECT_SUCCESS(s2n_config_add_cert_chain_and_key(config, cert, key));
+            EXPECT_NOT_NULL(s2n_config_get_single_default_cert(config));
+
+            EXPECT_SUCCESS(s2n_config_set_extension_data(config, S2N_EXTENSION_OCSP_STAPLING,
+                    extension_data, sizeof(extension_data)));
+            EXPECT_EQUAL(s2n_config_get_single_default_cert(config)->ocsp_status.size, sizeof(extension_data));
+        }
+
+        /* Test s2n_config_set_extension_data can't be called for unowned cert chains */
+        {
+            DEFER_CLEANUP(struct s2n_cert_chain_and_key *chain = NULL,
+                    s2n_cert_chain_and_key_ptr_free);
+            EXPECT_SUCCESS(s2n_test_cert_chain_and_key_new(&chain,
+                    S2N_DEFAULT_TEST_CERT_CHAIN, S2N_DEFAULT_TEST_PRIVATE_KEY));
+
+            DEFER_CLEANUP(struct s2n_config *config = s2n_config_new(), s2n_config_ptr_free);
+            EXPECT_SUCCESS(s2n_config_add_cert_chain_and_key_to_store(config, chain));
+            EXPECT_NOT_NULL(s2n_config_get_single_default_cert(config));
+
+            EXPECT_FAILURE_WITH_ERRNO(s2n_config_set_extension_data(config, S2N_EXTENSION_OCSP_STAPLING,
+                    extension_data, sizeof(extension_data)), S2N_ERR_CERT_OWNERSHIP);
+            EXPECT_EQUAL(s2n_config_get_single_default_cert(config)->ocsp_status.size, 0);
+            EXPECT_EQUAL(chain->ocsp_status.size, 0);
+        }
+    }
+
+    /* Test s2n_config_free_cert_chain_and_key */
+    {
+        /* Chain owned by application */
+        {
+            DEFER_CLEANUP(struct s2n_cert_chain_and_key *chain = NULL, s2n_cert_chain_and_key_ptr_free);
+            EXPECT_SUCCESS(s2n_test_cert_chain_and_key_new(&chain,
+                    S2N_DEFAULT_TEST_CERT_CHAIN, S2N_DEFAULT_TEST_PRIVATE_KEY));
+
+            DEFER_CLEANUP(struct s2n_config *config = s2n_config_new(), s2n_config_ptr_free);
+            EXPECT_NOT_NULL(config);
+            EXPECT_SUCCESS(s2n_config_add_cert_chain_and_key_to_store(config, chain));
+            EXPECT_NOT_NULL(s2n_config_get_single_default_cert(config));
+            EXPECT_EQUAL(config->cert_ownership, S2N_APP_OWNED);
+
+            /* No-op for application-owned chains */
+            EXPECT_SUCCESS(s2n_config_free_cert_chain_and_key(config));
+            EXPECT_NOT_NULL(s2n_config_get_single_default_cert(config));
+            EXPECT_EQUAL(config->cert_ownership, S2N_APP_OWNED);
+
+            /* Still no-op if called again */
+            EXPECT_SUCCESS(s2n_config_free_cert_chain_and_key(config));
+            EXPECT_NOT_NULL(s2n_config_get_single_default_cert(config));
+        }
+
+        /* Chain owned by application and freed too early:
+         * This is arguably incorrect behavior, but did not cause errors in the past.
+         * We should continue to ensure it doesn't cause any errors.
+         */
+        {
+            struct s2n_cert_chain_and_key *chain = NULL;
+            EXPECT_SUCCESS(s2n_test_cert_chain_and_key_new(&chain,
+                    S2N_DEFAULT_TEST_CERT_CHAIN, S2N_DEFAULT_TEST_PRIVATE_KEY));
+
+            DEFER_CLEANUP(struct s2n_config *config = s2n_config_new(), s2n_config_ptr_free);
+            EXPECT_NOT_NULL(config);
+            EXPECT_SUCCESS(s2n_config_add_cert_chain_and_key_to_store(config, chain));
+            EXPECT_NOT_NULL(s2n_config_get_single_default_cert(config));
+            EXPECT_EQUAL(config->cert_ownership, S2N_APP_OWNED);
+
+            /* Free the chain early */
+            EXPECT_SUCCESS(s2n_cert_chain_and_key_free(chain));
+
+            /* No-op for application-owned chains */
+            EXPECT_SUCCESS(s2n_config_free_cert_chain_and_key(config));
+            EXPECT_NOT_NULL(s2n_config_get_single_default_cert(config));
+            EXPECT_EQUAL(config->cert_ownership, S2N_APP_OWNED);
+
+            /* No-op if called again */
+            EXPECT_SUCCESS(s2n_config_free_cert_chain_and_key(config));
+            EXPECT_NOT_NULL(s2n_config_get_single_default_cert(config));
+        }
+
+        /* Chain owned by library */
+        {
+            DEFER_CLEANUP(struct s2n_config *config = s2n_config_new(), s2n_config_ptr_free);
+            EXPECT_NOT_NULL(config);
+            EXPECT_SUCCESS(s2n_config_add_cert_chain_and_key(config, cert, key));
+            EXPECT_NOT_NULL(s2n_config_get_single_default_cert(config));
+            EXPECT_EQUAL(config->cert_ownership, S2N_LIB_OWNED);
+
+            EXPECT_SUCCESS(s2n_config_free_cert_chain_and_key(config));
+            EXPECT_NULL(s2n_config_get_single_default_cert(config));
+            EXPECT_EQUAL(config->cert_ownership, S2N_NOT_OWNED);
+
+            /* No-op if called again */
+            EXPECT_SUCCESS(s2n_config_free_cert_chain_and_key(config));
+            EXPECT_NULL(s2n_config_get_single_default_cert(config));
+        }
+
+        /* Switch from library-owned certs to application-owned certs */
+        {
+            DEFER_CLEANUP(struct s2n_cert_chain_and_key *chain = NULL, s2n_cert_chain_and_key_ptr_free);
+            EXPECT_SUCCESS(s2n_test_cert_chain_and_key_new(&chain,
+                    S2N_DEFAULT_TEST_CERT_CHAIN, S2N_DEFAULT_TEST_PRIVATE_KEY));
+
+            DEFER_CLEANUP(struct s2n_config *config = s2n_config_new(), s2n_config_ptr_free);
+            EXPECT_NOT_NULL(config);
+            EXPECT_SUCCESS(s2n_config_add_cert_chain_and_key(config, cert, key));
+            EXPECT_NOT_NULL(s2n_config_get_single_default_cert(config));
+            EXPECT_EQUAL(config->cert_ownership, S2N_LIB_OWNED);
+
+            EXPECT_SUCCESS(s2n_config_free_cert_chain_and_key(config));
+            EXPECT_NULL(s2n_config_get_single_default_cert(config));
+            EXPECT_EQUAL(config->cert_ownership, S2N_NOT_OWNED);
+
+            /* Now add an application-owned chain */
+            EXPECT_SUCCESS(s2n_config_add_cert_chain_and_key_to_store(config, chain));
+            EXPECT_SUCCESS(s2n_config_free_cert_chain_and_key(config));
+        }
+    }
+
+    /* Test s2n_config_set_cert_chain_and_key_defaults */
+    {
+        /* Succeeds if chains owned by app */
+        {
+            DEFER_CLEANUP(struct s2n_cert_chain_and_key *chain_1 = NULL, s2n_cert_chain_and_key_ptr_free);
+            EXPECT_SUCCESS(s2n_test_cert_chain_and_key_new(&chain_1,
+                    S2N_DEFAULT_TEST_CERT_CHAIN, S2N_DEFAULT_TEST_PRIVATE_KEY));
+
+            DEFER_CLEANUP(struct s2n_cert_chain_and_key *chain_2 = NULL, s2n_cert_chain_and_key_ptr_free);
+            EXPECT_SUCCESS(s2n_test_cert_chain_and_key_new(&chain_2,
+                    S2N_DEFAULT_TEST_CERT_CHAIN, S2N_DEFAULT_TEST_PRIVATE_KEY));
+
+            DEFER_CLEANUP(struct s2n_config *config = s2n_config_new(), s2n_config_ptr_free);
+            EXPECT_NOT_NULL(config);
+            EXPECT_SUCCESS(s2n_config_add_cert_chain_and_key_to_store(config, chain_1));
+            EXPECT_EQUAL(s2n_config_get_single_default_cert(config), chain_1);
+            EXPECT_EQUAL(config->cert_ownership, S2N_APP_OWNED);
+
+            EXPECT_SUCCESS(s2n_config_set_cert_chain_and_key_defaults(config, &chain_2, 1));
+            EXPECT_EQUAL(s2n_config_get_single_default_cert(config), chain_2);
+            EXPECT_EQUAL(config->cert_ownership, S2N_APP_OWNED);
+        }
+
+        /* Fails if chains owned by library */
+        {
+            DEFER_CLEANUP(struct s2n_cert_chain_and_key *chain = NULL, s2n_cert_chain_and_key_ptr_free);
+            EXPECT_SUCCESS(s2n_test_cert_chain_and_key_new(&chain,
+                    S2N_DEFAULT_TEST_CERT_CHAIN, S2N_DEFAULT_TEST_PRIVATE_KEY));
+
+            DEFER_CLEANUP(struct s2n_config *config = s2n_config_new(), s2n_config_ptr_free);
+            EXPECT_NOT_NULL(config);
+            EXPECT_SUCCESS(s2n_config_add_cert_chain_and_key(config, cert, key));
+            EXPECT_NOT_NULL(s2n_config_get_single_default_cert(config));
+            EXPECT_EQUAL(config->cert_ownership, S2N_LIB_OWNED);
+
+            EXPECT_FAILURE_WITH_ERRNO(s2n_config_set_cert_chain_and_key_defaults(
+                    config, &chain, 1), S2N_ERR_CERT_OWNERSHIP);
+        }
+    }
+
+    /* Test s2n_config_set_send_buffer_size */
+    {
+        const uint32_t min_size = S2N_TLS_MAX_RECORD_LEN_FOR(1);
+
+        /* Safety */
+        {
+            DEFER_CLEANUP(struct s2n_config *config = s2n_config_new(), s2n_config_ptr_free);
+            EXPECT_NOT_NULL(config);
+
+            EXPECT_EQUAL(config->send_buffer_size_override, 0);
+            EXPECT_FAILURE_WITH_ERRNO(s2n_config_set_send_buffer_size(NULL, min_size), S2N_ERR_NULL);
+            EXPECT_FAILURE_WITH_ERRNO(s2n_config_set_send_buffer_size(config, 0), S2N_ERR_INVALID_ARGUMENT);
+            EXPECT_EQUAL(config->send_buffer_size_override, 0);
+        }
+
+        /* Default applied to connection */
+        {
+            DEFER_CLEANUP(struct s2n_config *config = s2n_config_new(), s2n_config_ptr_free);
+            EXPECT_NOT_NULL(config);
+
+            DEFER_CLEANUP(struct s2n_connection *conn = s2n_connection_new(S2N_SERVER), s2n_connection_ptr_free);
+            EXPECT_NOT_NULL(conn);
+            EXPECT_SUCCESS(s2n_connection_set_config(conn, config));
+
+            EXPECT_EQUAL(config->send_buffer_size_override, 0);
+            EXPECT_FALSE(conn->multirecord_send);
+        }
+
+        /* Custom applied to connection */
+        {
+            DEFER_CLEANUP(struct s2n_config *config = s2n_config_new(), s2n_config_ptr_free);
+            EXPECT_NOT_NULL(config);
+            EXPECT_SUCCESS(s2n_config_set_send_buffer_size(config, min_size));
+
+            DEFER_CLEANUP(struct s2n_connection *conn = s2n_connection_new(S2N_SERVER), s2n_connection_ptr_free);
+            EXPECT_NOT_NULL(conn);
+            EXPECT_SUCCESS(s2n_connection_set_config(conn, config));
+
+            EXPECT_EQUAL(config->send_buffer_size_override, min_size);
+            EXPECT_TRUE(conn->multirecord_send);
+        }
+    }
+
+    /* Test s2n_config_set_verify_after_sign */
+    {
+        DEFER_CLEANUP(struct s2n_config *config = s2n_config_new(), s2n_config_ptr_free);
+        EXPECT_NOT_NULL(config);
+        EXPECT_FALSE(config->verify_after_sign);
+
+        /* Safety */
+        EXPECT_FAILURE_WITH_ERRNO(s2n_config_set_verify_after_sign(NULL, S2N_VERIFY_AFTER_SIGN_ENABLED), S2N_ERR_NULL);
+
+        /* Invalid mode */
+        config->verify_after_sign = true;
+        EXPECT_FAILURE_WITH_ERRNO(s2n_config_set_verify_after_sign(config, UINT8_MAX), S2N_ERR_INVALID_ARGUMENT);
+        EXPECT_TRUE(config->verify_after_sign);
+        config->verify_after_sign = false;
+        EXPECT_FAILURE_WITH_ERRNO(s2n_config_set_verify_after_sign(config, UINT8_MAX), S2N_ERR_INVALID_ARGUMENT);
+        EXPECT_FALSE(config->verify_after_sign);
+
+        /* Set and unset */
+        EXPECT_SUCCESS(s2n_config_set_verify_after_sign(config, S2N_VERIFY_AFTER_SIGN_ENABLED));
+        EXPECT_TRUE(config->verify_after_sign);
+        EXPECT_SUCCESS(s2n_config_set_verify_after_sign(config, S2N_VERIFY_AFTER_SIGN_DISABLED));
+        EXPECT_FALSE(config->verify_after_sign);
+    }
+
+    /* Test s2n_config_set_renegotiate_request_cb */
+    {
+        uint8_t context = 0;
+        DEFER_CLEANUP(struct s2n_config *config = s2n_config_new(), s2n_config_ptr_free);
+        EXPECT_NOT_NULL(config);
+
+        /* Unset by default */
+        EXPECT_EQUAL(config->renegotiate_request_cb, NULL);
+        EXPECT_EQUAL(config->renegotiate_request_ctx, NULL);
+
+        /* Safety */
+        EXPECT_FAILURE_WITH_ERRNO(s2n_config_set_renegotiate_request_cb(NULL, s2n_test_reneg_req_cb, &context), S2N_ERR_NULL);
+        EXPECT_SUCCESS(s2n_config_set_renegotiate_request_cb(config, NULL, &context));
+        EXPECT_SUCCESS(s2n_config_set_renegotiate_request_cb(config, s2n_test_reneg_req_cb, NULL));
+
+        /* Set */
+        EXPECT_SUCCESS(s2n_config_set_renegotiate_request_cb(config, s2n_test_reneg_req_cb, &context));
+        EXPECT_EQUAL(config->renegotiate_request_cb, s2n_test_reneg_req_cb);
+        EXPECT_EQUAL(config->renegotiate_request_ctx, &context);
+
+        /* Unset */
+        EXPECT_SUCCESS(s2n_config_set_renegotiate_request_cb(config, NULL, NULL));
+        EXPECT_EQUAL(config->renegotiate_request_cb, NULL);
+        EXPECT_EQUAL(config->renegotiate_request_ctx, NULL);
     }
 
     END_TEST();

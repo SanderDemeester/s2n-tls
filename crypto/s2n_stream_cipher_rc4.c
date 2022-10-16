@@ -16,6 +16,7 @@
 #include <openssl/rc4.h>
 
 #include "crypto/s2n_cipher.h"
+#include "crypto/s2n_fips.h"
 #include "crypto/s2n_openssl.h"
 
 #include "utils/s2n_safety.h"
@@ -23,14 +24,24 @@
 
 static uint8_t s2n_stream_cipher_rc4_available()
 {
-    return (EVP_rc4() ? 1 : 0);
+#ifdef S2N_LIBCRYPTO_SUPPORTS_EVP_RC4
+    if (s2n_is_in_fips_mode()) {
+        return 0;
+    } else {
+        return (EVP_rc4() ? 1 : 0);
+    }
+#else
+    return 0;
+#endif /* S2N_LIBCRYPTO_SUPPORTS_EVP_RC4 */
 }
 
+#ifdef S2N_LIBCRYPTO_SUPPORTS_EVP_RC4
 static int s2n_stream_cipher_rc4_encrypt(struct s2n_session_key *key, struct s2n_blob *in, struct s2n_blob *out)
 {
     POSIX_ENSURE_GTE(out->size, in->size);
 
-    int len = out->size;
+    /* len is set by EVP_EncryptUpdate and checked post operation */
+    int len = 0;
     POSIX_GUARD_OSSL(EVP_EncryptUpdate(key->evp_cipher_ctx, out->data, &len, in->data, in->size), S2N_ERR_ENCRYPT);
 
     S2N_ERROR_IF(len != in->size, S2N_ERR_ENCRYPT);
@@ -42,10 +53,11 @@ static int s2n_stream_cipher_rc4_decrypt(struct s2n_session_key *key, struct s2n
 {
     POSIX_ENSURE_GTE(out->size, in->size);
 
-    int len = out->size;
-    POSIX_GUARD_OSSL(EVP_DecryptUpdate(key->evp_cipher_ctx, out->data, &len, in->data, in->size), S2N_ERR_ENCRYPT);
+    /* len is set by EVP_DecryptUpdate and checked post operation */
+    int len = 0;
+    POSIX_GUARD_OSSL(EVP_DecryptUpdate(key->evp_cipher_ctx, out->data, &len, in->data, in->size), S2N_ERR_DECRYPT);
 
-    S2N_ERROR_IF(len != in->size, S2N_ERR_ENCRYPT);
+    S2N_ERROR_IF(len != in->size, S2N_ERR_DECRYPT);
 
     return 0;
 }
@@ -79,6 +91,39 @@ static int s2n_stream_cipher_rc4_destroy_key(struct s2n_session_key *key)
 
     return 0;
 }
+#else
+
+static int s2n_stream_cipher_rc4_encrypt(struct s2n_session_key *key, struct s2n_blob *in, struct s2n_blob *out)
+{
+    POSIX_BAIL(S2N_ERR_UNIMPLEMENTED);
+}
+
+static int s2n_stream_cipher_rc4_decrypt(struct s2n_session_key *key, struct s2n_blob *in, struct s2n_blob *out)
+{
+    POSIX_BAIL(S2N_ERR_UNIMPLEMENTED);
+}
+
+static int s2n_stream_cipher_rc4_set_encryption_key(struct s2n_session_key *key, struct s2n_blob *in)
+{
+    POSIX_BAIL(S2N_ERR_UNIMPLEMENTED);
+}
+
+static int s2n_stream_cipher_rc4_set_decryption_key(struct s2n_session_key *key, struct s2n_blob *in)
+{
+    POSIX_BAIL(S2N_ERR_UNIMPLEMENTED);
+}
+
+static int s2n_stream_cipher_rc4_init(struct s2n_session_key *key)
+{
+    POSIX_BAIL(S2N_ERR_UNIMPLEMENTED);
+}
+
+static int s2n_stream_cipher_rc4_destroy_key(struct s2n_session_key *key)
+{
+    POSIX_BAIL(S2N_ERR_UNIMPLEMENTED);
+}
+
+#endif /* S2N_LIBCRYPTO_SUPPORTS_EVP_RC4 */
 
 struct s2n_cipher s2n_rc4 = {
     .type = S2N_STREAM,

@@ -22,7 +22,7 @@
 
 #define S2N_MAX_HASHLEN SHA384_DIGEST_LENGTH
 
-#define CONN_HMAC_ALG(conn) ((conn)->secure.cipher_suite->prf_alg)
+#define CONN_HMAC_ALG(conn) ((conn)->secure->cipher_suite->prf_alg)
 #define CONN_SECRETS(conn)  ((conn)->secrets.tls13)
 #define CONN_HASHES(conn)   ((conn)->handshake.hashes)
 
@@ -103,11 +103,12 @@ S2N_RESULT s2n_tls13_empty_transcripts_init()
 static S2N_RESULT s2n_calculate_transcript_digest(struct s2n_connection *conn)
 {
     RESULT_ENSURE_REF(conn);
+    RESULT_ENSURE_REF(conn->secure);
+    RESULT_ENSURE_REF(conn->secure->cipher_suite);
     RESULT_ENSURE_REF(conn->handshake.hashes);
 
     s2n_hash_algorithm hash_algorithm = S2N_HASH_NONE;
-    RESULT_ENSURE_REF(conn->secure.cipher_suite);
-    RESULT_GUARD_POSIX(s2n_hmac_hash_alg(conn->secure.cipher_suite->prf_alg, &hash_algorithm));
+    RESULT_GUARD_POSIX(s2n_hmac_hash_alg(conn->secure->cipher_suite->prf_alg, &hash_algorithm));
 
     uint8_t digest_size = 0;
     RESULT_GUARD_POSIX(s2n_hash_digest_size(hash_algorithm, &digest_size));
@@ -192,9 +193,11 @@ static S2N_RESULT s2n_derive_secret_without_context(struct s2n_connection *conn,
  *# finished_key =
  *#     HKDF-Expand-Label(BaseKey, "finished", "", Hash.length)
  **/
-S2N_RESULT s2n_tls13_compute_finished_key(s2n_hmac_algorithm hmac_alg,
+static S2N_RESULT s2n_tls13_compute_finished_key(struct s2n_connection *conn,
         const struct s2n_blob *base_key, struct s2n_blob *output)
 {
+    RESULT_GUARD(s2n_handshake_set_finished_len(conn, output->size));
+
     /*
      * TODO: We should be able to reuse the prf_work_space rather
      * than allocating a new HMAC every time.
@@ -202,7 +205,7 @@ S2N_RESULT s2n_tls13_compute_finished_key(s2n_hmac_algorithm hmac_alg,
     DEFER_CLEANUP(struct s2n_hmac_state hmac_state = { 0 }, s2n_hmac_free);
     RESULT_GUARD_POSIX(s2n_hmac_new(&hmac_state));
 
-    RESULT_GUARD_POSIX(s2n_hkdf_expand_label(&hmac_state, hmac_alg,
+    RESULT_GUARD_POSIX(s2n_hkdf_expand_label(&hmac_state, CONN_HMAC_ALG(conn),
             base_key, &s2n_tls13_label_finished, &(struct s2n_blob){0}, output));
     return S2N_RESULT_OK;
 }
@@ -377,7 +380,7 @@ static S2N_RESULT s2n_derive_client_handshake_traffic_secret(struct s2n_connecti
      *# The key used to compute the Finished message is computed from the
      *# Base Key defined in Section 4.4 using HKDF (see Section 7.1).
      */
-    RESULT_GUARD(s2n_tls13_compute_finished_key(CONN_HMAC_ALG(conn),
+    RESULT_GUARD(s2n_tls13_compute_finished_key(conn,
             output, &CONN_FINISHED(conn, client)));
 
     return S2N_RESULT_OK;
@@ -406,7 +409,7 @@ static S2N_RESULT s2n_derive_server_handshake_traffic_secret(struct s2n_connecti
      *# The key used to compute the Finished message is computed from the
      *# Base Key defined in Section 4.4 using HKDF (see Section 7.1).
      */
-    RESULT_GUARD(s2n_tls13_compute_finished_key(CONN_HMAC_ALG(conn),
+    RESULT_GUARD(s2n_tls13_compute_finished_key(conn,
             output, &CONN_FINISHED(conn, server)));
 
     return S2N_RESULT_OK;
@@ -494,7 +497,8 @@ static s2n_result (*extract_methods[])(struct s2n_connection *conn) = {
 S2N_RESULT s2n_tls13_extract_secret(struct s2n_connection *conn, s2n_extract_secret_type_t secret_type)
 {
     RESULT_ENSURE_REF(conn);
-    RESULT_ENSURE_REF(conn->secure.cipher_suite);
+    RESULT_ENSURE_REF(conn->secure);
+    RESULT_ENSURE_REF(conn->secure->cipher_suite);
     RESULT_ENSURE_REF(conn->handshake.hashes);
     RESULT_ENSURE_NE(secret_type, S2N_NONE_SECRET);
 
@@ -522,7 +526,8 @@ S2N_RESULT s2n_tls13_derive_secret(struct s2n_connection *conn, s2n_extract_secr
 {
     RESULT_ENSURE_REF(conn);
     RESULT_ENSURE_REF(secret);
-    RESULT_ENSURE_REF(conn->secure.cipher_suite);
+    RESULT_ENSURE_REF(conn->secure);
+    RESULT_ENSURE_REF(conn->secure->cipher_suite);
     RESULT_ENSURE_REF(conn->handshake.hashes);
     RESULT_ENSURE_NE(secret_type, S2N_NONE_SECRET);
 
@@ -567,7 +572,8 @@ S2N_RESULT s2n_tls13_secrets_update(struct s2n_connection *conn)
     if (s2n_connection_get_protocol_version(conn) < S2N_TLS13) {
         return S2N_RESULT_OK;
     }
-    RESULT_ENSURE_REF(conn->secure.cipher_suite);
+    RESULT_ENSURE_REF(conn->secure);
+    RESULT_ENSURE_REF(conn->secure->cipher_suite);
 
     message_type_t message_type = s2n_conn_get_current_message_type(conn);
     switch(message_type) {

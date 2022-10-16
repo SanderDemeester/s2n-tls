@@ -44,6 +44,11 @@ static int s2n_sslv3_prf(struct s2n_connection *conn, struct s2n_blob *secret, s
     POSIX_ENSURE_REF(conn->handshake.hashes);
     struct s2n_hash_state *workspace = &conn->handshake.hashes->hash_workspace;
 
+    /* FIPS specifically allows MD5 for the legacy PRF */
+    if (s2n_is_in_fips_mode() && conn->actual_protocol_version < S2N_TLS12) {
+        POSIX_GUARD(s2n_hash_allow_md5_for_fips(workspace));
+    }
+
     uint32_t outputlen = out->size;
     uint8_t *output = out->data;
     uint8_t iteration = 1;
@@ -461,6 +466,7 @@ static int s2n_prf(struct s2n_connection *conn, struct s2n_blob *secret, struct 
     POSIX_ENSURE_REF(conn);
     POSIX_ENSURE_REF(secret);
     POSIX_ENSURE_REF(conn->prf_space);
+    POSIX_ENSURE_REF(conn->secure);
 
     /* seed_a is always required, seed_b is optional, if seed_c is provided seed_b must also be provided */
     S2N_ERROR_IF(seed_a == NULL, S2N_ERR_PRF_INVALID_SEED);
@@ -479,7 +485,7 @@ static int s2n_prf(struct s2n_connection *conn, struct s2n_blob *secret, struct 
     POSIX_GUARD(s2n_blob_zero(out));
     
     if (conn->actual_protocol_version == S2N_TLS12) {
-        return s2n_p_hash(conn->prf_space, conn->secure.cipher_suite->prf_alg, secret, label, seed_a, seed_b,
+        return s2n_p_hash(conn->prf_space, conn->secure->cipher_suite->prf_alg, secret, label, seed_a, seed_b,
                           seed_c, out);
     }
 
@@ -519,6 +525,7 @@ int s2n_hybrid_prf_master_secret(struct s2n_connection *conn, struct s2n_blob *p
 int s2n_prf_calculate_master_secret(struct s2n_connection *conn, struct s2n_blob *premaster_secret)
 {
     POSIX_ENSURE_REF(conn);
+    POSIX_ENSURE_REF(conn->secure);
 
     POSIX_ENSURE_EQ(s2n_conn_get_current_message_type(conn), CLIENT_KEY);
 
@@ -548,7 +555,7 @@ int s2n_prf_calculate_master_secret(struct s2n_connection *conn, struct s2n_blob
         POSIX_GUARD_RESULT(s2n_prf_get_digest_for_ems(conn, &client_key_blob, S2N_HASH_SHA1, &sha1_digest));
         POSIX_GUARD_RESULT(s2n_tls_prf_extended_master_secret(conn, premaster_secret, &digest, &sha1_digest));
     } else {
-        s2n_hmac_algorithm prf_alg = conn->secure.cipher_suite->prf_alg;
+        s2n_hmac_algorithm prf_alg = conn->secure->cipher_suite->prf_alg;
         s2n_hash_algorithm hash_alg = 0;
         POSIX_GUARD(s2n_hmac_hash_alg(prf_alg, &hash_alg));
         POSIX_GUARD_RESULT(s2n_prf_get_digest_for_ems(conn, &client_key_blob, hash_alg, &digest));
@@ -614,7 +621,7 @@ static int s2n_sslv3_finished(struct s2n_connection *conn, uint8_t prefix[4], st
     uint8_t *md5_digest = out;
     uint8_t *sha_digest = out + MD5_DIGEST_LENGTH;
 
-    POSIX_ENSURE_LTE(MD5_DIGEST_LENGTH + SHA_DIGEST_LENGTH, sizeof(conn->handshake.client_finished));
+    POSIX_GUARD_RESULT(s2n_handshake_set_finished_len(conn, MD5_DIGEST_LENGTH + SHA_DIGEST_LENGTH));
 
     struct s2n_hash_state *md5 = hash_workspace;
     POSIX_GUARD(s2n_hash_copy(md5, &conn->handshake.hashes->md5));
@@ -652,7 +659,6 @@ static int s2n_sslv3_client_finished(struct s2n_connection *conn)
 
     uint8_t prefix[4] = { 0x43, 0x4c, 0x4e, 0x54 };
 
-    POSIX_ENSURE_LTE(MD5_DIGEST_LENGTH + SHA_DIGEST_LENGTH, sizeof(conn->handshake.client_finished));
     return s2n_sslv3_finished(conn, prefix, &conn->handshake.hashes->hash_workspace, conn->handshake.client_finished);
 }
 
@@ -663,13 +669,13 @@ static int s2n_sslv3_server_finished(struct s2n_connection *conn)
 
     uint8_t prefix[4] = { 0x53, 0x52, 0x56, 0x52 };
 
-    POSIX_ENSURE_LTE(MD5_DIGEST_LENGTH + SHA_DIGEST_LENGTH, sizeof(conn->handshake.server_finished));
     return s2n_sslv3_finished(conn, prefix, &conn->handshake.hashes->hash_workspace, conn->handshake.server_finished);
 }
 
 int s2n_prf_client_finished(struct s2n_connection *conn)
 {
     POSIX_ENSURE_REF(conn);
+    POSIX_ENSURE_REF(conn->secure);
     POSIX_ENSURE_REF(conn->handshake.hashes);
 
     struct s2n_blob master_secret, md5, sha;
@@ -685,13 +691,14 @@ int s2n_prf_client_finished(struct s2n_connection *conn)
 
     client_finished.data = conn->handshake.client_finished;
     client_finished.size = S2N_TLS_FINISHED_LEN;
+    POSIX_GUARD_RESULT(s2n_handshake_set_finished_len(conn, client_finished.size));
     label.data = client_finished_label;
     label.size = sizeof(client_finished_label) - 1;
 
     master_secret.data = conn->secrets.tls12.master_secret;
     master_secret.size = sizeof(conn->secrets.tls12.master_secret);
     if (conn->actual_protocol_version == S2N_TLS12) {
-        switch (conn->secure.cipher_suite->prf_alg) {
+        switch (conn->secure->cipher_suite->prf_alg) {
         case S2N_HMAC_SHA256:
             POSIX_GUARD(s2n_hash_copy(&conn->handshake.hashes->hash_workspace, &conn->handshake.hashes->sha256));
             POSIX_GUARD(s2n_hash_digest(&conn->handshake.hashes->hash_workspace, sha_digest, SHA256_DIGEST_LENGTH));
@@ -726,6 +733,7 @@ int s2n_prf_client_finished(struct s2n_connection *conn)
 int s2n_prf_server_finished(struct s2n_connection *conn)
 {
     POSIX_ENSURE_REF(conn);
+    POSIX_ENSURE_REF(conn->secure);
     POSIX_ENSURE_REF(conn->handshake.hashes);
 
     struct s2n_blob master_secret, md5, sha;
@@ -741,13 +749,14 @@ int s2n_prf_server_finished(struct s2n_connection *conn)
 
     server_finished.data = conn->handshake.server_finished;
     server_finished.size = S2N_TLS_FINISHED_LEN;
+    POSIX_GUARD_RESULT(s2n_handshake_set_finished_len(conn, server_finished.size));
     label.data = server_finished_label;
     label.size = sizeof(server_finished_label) - 1;
 
     master_secret.data = conn->secrets.tls12.master_secret;
     master_secret.size = sizeof(conn->secrets.tls12.master_secret);
     if (conn->actual_protocol_version == S2N_TLS12) {
-        switch (conn->secure.cipher_suite->prf_alg) {
+        switch (conn->secure->cipher_suite->prf_alg) {
         case S2N_HMAC_SHA256:
             POSIX_GUARD(s2n_hash_copy(&conn->handshake.hashes->hash_workspace, &conn->handshake.hashes->sha256));
             POSIX_GUARD(s2n_hash_digest(&conn->handshake.hashes->hash_workspace, sha_digest, SHA256_DIGEST_LENGTH));
@@ -781,15 +790,18 @@ int s2n_prf_server_finished(struct s2n_connection *conn)
 
 static int s2n_prf_make_client_key(struct s2n_connection *conn, struct s2n_stuffer *key_material)
 {
+    POSIX_ENSURE_REF(conn);
+    POSIX_ENSURE_REF(conn->secure);
+
     struct s2n_blob client_key = {0};
-    client_key.size = conn->secure.cipher_suite->record_alg->cipher->key_material_size;
+    client_key.size = conn->secure->cipher_suite->record_alg->cipher->key_material_size;
     client_key.data = s2n_stuffer_raw_read(key_material, client_key.size);
     POSIX_ENSURE_REF(client_key.data);
 
     if (conn->mode == S2N_CLIENT) {
-        POSIX_GUARD(conn->secure.cipher_suite->record_alg->cipher->set_encryption_key(&conn->secure.client_key, &client_key));
+        POSIX_GUARD(conn->secure->cipher_suite->record_alg->cipher->set_encryption_key(&conn->secure->client_key, &client_key));
     } else {
-        POSIX_GUARD(conn->secure.cipher_suite->record_alg->cipher->set_decryption_key(&conn->secure.client_key, &client_key));
+        POSIX_GUARD(conn->secure->cipher_suite->record_alg->cipher->set_decryption_key(&conn->secure->client_key, &client_key));
     }
 
     return 0;
@@ -797,15 +809,18 @@ static int s2n_prf_make_client_key(struct s2n_connection *conn, struct s2n_stuff
 
 static int s2n_prf_make_server_key(struct s2n_connection *conn, struct s2n_stuffer *key_material)
 {
+    POSIX_ENSURE_REF(conn);
+    POSIX_ENSURE_REF(conn->secure);
+
     struct s2n_blob server_key = {0};
-    server_key.size = conn->secure.cipher_suite->record_alg->cipher->key_material_size;
+    server_key.size = conn->secure->cipher_suite->record_alg->cipher->key_material_size;
     server_key.data = s2n_stuffer_raw_read(key_material, server_key.size);
     POSIX_ENSURE_REF(server_key.data);
 
     if (conn->mode == S2N_SERVER) {
-        POSIX_GUARD(conn->secure.cipher_suite->record_alg->cipher->set_encryption_key(&conn->secure.server_key, &server_key));
+        POSIX_GUARD(conn->secure->cipher_suite->record_alg->cipher->set_encryption_key(&conn->secure->server_key, &server_key));
     } else {
-        POSIX_GUARD(conn->secure.cipher_suite->record_alg->cipher->set_decryption_key(&conn->secure.server_key, &server_key));
+        POSIX_GUARD(conn->secure->cipher_suite->record_alg->cipher->set_decryption_key(&conn->secure->server_key, &server_key));
     }
 
     return 0;
@@ -813,6 +828,9 @@ static int s2n_prf_make_server_key(struct s2n_connection *conn, struct s2n_stuff
 
 int s2n_prf_key_expansion(struct s2n_connection *conn)
 {
+    POSIX_ENSURE_REF(conn);
+    POSIX_ENSURE_REF(conn->secure);
+
     struct s2n_blob client_random = {.data = conn->handshake_params.client_random,.size = sizeof(conn->handshake_params.client_random) };
     struct s2n_blob server_random = {.data = conn->handshake_params.server_random,.size = sizeof(conn->handshake_params.server_random) };
     struct s2n_blob master_secret = {.data = conn->secrets.tls12.master_secret,.size = sizeof(conn->secrets.tls12.master_secret) };
@@ -829,29 +847,29 @@ int s2n_prf_key_expansion(struct s2n_connection *conn)
     POSIX_GUARD(s2n_stuffer_init(&key_material, &out));
     POSIX_GUARD(s2n_stuffer_write(&key_material, &out));
 
-    POSIX_ENSURE(conn->secure.cipher_suite->available, S2N_ERR_PRF_INVALID_ALGORITHM);
-    POSIX_GUARD(conn->secure.cipher_suite->record_alg->cipher->init(&conn->secure.client_key));
-    POSIX_GUARD(conn->secure.cipher_suite->record_alg->cipher->init(&conn->secure.server_key));
+    POSIX_ENSURE(conn->secure->cipher_suite->available, S2N_ERR_PRF_INVALID_ALGORITHM);
+    POSIX_GUARD(conn->secure->cipher_suite->record_alg->cipher->init(&conn->secure->client_key));
+    POSIX_GUARD(conn->secure->cipher_suite->record_alg->cipher->init(&conn->secure->server_key));
 
     /* Check that we have a valid MAC and key size */
     uint8_t mac_size;
-    if (conn->secure.cipher_suite->record_alg->cipher->type == S2N_COMPOSITE) {
-        mac_size = conn->secure.cipher_suite->record_alg->cipher->io.comp.mac_key_size;
+    if (conn->secure->cipher_suite->record_alg->cipher->type == S2N_COMPOSITE) {
+        mac_size = conn->secure->cipher_suite->record_alg->cipher->io.comp.mac_key_size;
     } else {
-        POSIX_GUARD(s2n_hmac_digest_size(conn->secure.cipher_suite->record_alg->hmac_alg, &mac_size));
+        POSIX_GUARD(s2n_hmac_digest_size(conn->secure->cipher_suite->record_alg->hmac_alg, &mac_size));
     }
 
     /* Seed the client MAC */
     uint8_t *client_mac_write_key = s2n_stuffer_raw_read(&key_material, mac_size);
     POSIX_ENSURE_REF(client_mac_write_key);
-    POSIX_GUARD(s2n_hmac_reset(&conn->secure.client_record_mac));
-    POSIX_GUARD(s2n_hmac_init(&conn->secure.client_record_mac, conn->secure.cipher_suite->record_alg->hmac_alg, client_mac_write_key, mac_size));
+    POSIX_GUARD(s2n_hmac_reset(&conn->secure->client_record_mac));
+    POSIX_GUARD(s2n_hmac_init(&conn->secure->client_record_mac, conn->secure->cipher_suite->record_alg->hmac_alg, client_mac_write_key, mac_size));
 
     /* Seed the server MAC */
     uint8_t *server_mac_write_key = s2n_stuffer_raw_read(&key_material, mac_size);
     POSIX_ENSURE_REF(server_mac_write_key);
-    POSIX_GUARD(s2n_hmac_reset(&conn->secure.server_record_mac));
-    POSIX_GUARD(s2n_hmac_init(&conn->secure.server_record_mac, conn->secure.cipher_suite->record_alg->hmac_alg, server_mac_write_key, mac_size));
+    POSIX_GUARD(s2n_hmac_reset(&conn->secure->server_record_mac));
+    POSIX_GUARD(s2n_hmac_init(&conn->secure->server_record_mac, conn->secure->cipher_suite->record_alg->hmac_alg, server_mac_write_key, mac_size));
 
     /* Make the client key */
     POSIX_GUARD(s2n_prf_make_client_key(conn, &key_material));
@@ -862,34 +880,34 @@ int s2n_prf_key_expansion(struct s2n_connection *conn)
     /* Composite CBC does MAC inside the cipher, pass it the MAC key. 
      * Must happen after setting encryption/decryption keys.
      */
-    if (conn->secure.cipher_suite->record_alg->cipher->type == S2N_COMPOSITE) {
-        POSIX_GUARD(conn->secure.cipher_suite->record_alg->cipher->io.comp.set_mac_write_key(&conn->secure.server_key, server_mac_write_key, mac_size));
-        POSIX_GUARD(conn->secure.cipher_suite->record_alg->cipher->io.comp.set_mac_write_key(&conn->secure.client_key, client_mac_write_key, mac_size));
+    if (conn->secure->cipher_suite->record_alg->cipher->type == S2N_COMPOSITE) {
+        POSIX_GUARD(conn->secure->cipher_suite->record_alg->cipher->io.comp.set_mac_write_key(&conn->secure->server_key, server_mac_write_key, mac_size));
+        POSIX_GUARD(conn->secure->cipher_suite->record_alg->cipher->io.comp.set_mac_write_key(&conn->secure->client_key, client_mac_write_key, mac_size));
     }
 
     /* TLS >= 1.1 has no implicit IVs for non AEAD ciphers */
-    if (conn->actual_protocol_version > S2N_TLS10 && conn->secure.cipher_suite->record_alg->cipher->type != S2N_AEAD) {
+    if (conn->actual_protocol_version > S2N_TLS10 && conn->secure->cipher_suite->record_alg->cipher->type != S2N_AEAD) {
         return 0;
     }
 
     uint32_t implicit_iv_size = 0;
-    switch (conn->secure.cipher_suite->record_alg->cipher->type) {
+    switch (conn->secure->cipher_suite->record_alg->cipher->type) {
     case S2N_AEAD:
-        implicit_iv_size = conn->secure.cipher_suite->record_alg->cipher->io.aead.fixed_iv_size;
+        implicit_iv_size = conn->secure->cipher_suite->record_alg->cipher->io.aead.fixed_iv_size;
         break;
     case S2N_CBC:
-        implicit_iv_size = conn->secure.cipher_suite->record_alg->cipher->io.cbc.block_size;
+        implicit_iv_size = conn->secure->cipher_suite->record_alg->cipher->io.cbc.block_size;
         break;
     case S2N_COMPOSITE:
-        implicit_iv_size = conn->secure.cipher_suite->record_alg->cipher->io.comp.block_size;
+        implicit_iv_size = conn->secure->cipher_suite->record_alg->cipher->io.comp.block_size;
         break;
     /* No-op for stream ciphers */
     default:
         break;
     }
 
-    struct s2n_blob client_implicit_iv = {.data = conn->secure.client_implicit_iv,.size = implicit_iv_size };
-    struct s2n_blob server_implicit_iv = {.data = conn->secure.server_implicit_iv,.size = implicit_iv_size };
+    struct s2n_blob client_implicit_iv = {.data = conn->secure->client_implicit_iv,.size = implicit_iv_size };
+    struct s2n_blob server_implicit_iv = {.data = conn->secure->server_implicit_iv,.size = implicit_iv_size };
     POSIX_GUARD(s2n_stuffer_read(&key_material, &client_implicit_iv));
     POSIX_GUARD(s2n_stuffer_read(&key_material, &server_implicit_iv));
 

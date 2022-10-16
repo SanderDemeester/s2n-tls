@@ -697,34 +697,6 @@ struct s2n_cipher_suite s2n_ecdhe_kyber_rsa_with_aes_256_gcm_sha384 = /* 0xFF, 0
     .minimum_required_tls_version = S2N_TLS12,
 };
 
-struct s2n_cipher_suite s2n_ecdhe_bike_rsa_with_aes_256_gcm_sha384 = /* 0xFF, 0x04 */ {
-    .available = 0,
-    .name = "ECDHE-BIKE-RSA-AES256-GCM-SHA384",
-    .iana_value = { TLS_ECDHE_BIKE_RSA_WITH_AES_256_GCM_SHA384 },
-    .key_exchange_alg = &s2n_hybrid_ecdhe_kem,
-    .auth_method = S2N_AUTHENTICATION_RSA,
-    .record_alg = NULL,
-    .all_record_algs = { &s2n_record_alg_aes256_gcm },
-    .num_record_algs = 1,
-    .sslv3_record_alg = NULL,
-    .prf_alg = S2N_HMAC_SHA384,
-    .minimum_required_tls_version = S2N_TLS12,
-};
-
-struct s2n_cipher_suite s2n_ecdhe_sike_rsa_with_aes_256_gcm_sha384 = /* 0xFF, 0x08 */ {
-    .available = 0,
-    .name = "ECDHE-SIKE-RSA-AES256-GCM-SHA384",
-    .iana_value = { TLS_ECDHE_SIKE_RSA_WITH_AES_256_GCM_SHA384 },
-    .key_exchange_alg = &s2n_hybrid_ecdhe_kem,
-    .auth_method = S2N_AUTHENTICATION_RSA,
-    .record_alg = NULL,
-    .all_record_algs = { &s2n_record_alg_aes256_gcm },
-    .num_record_algs = 1,
-    .sslv3_record_alg = NULL,
-    .prf_alg = S2N_HMAC_SHA384,
-    .minimum_required_tls_version = S2N_TLS12,
-};
-
 struct s2n_cipher_suite s2n_tls13_aes_128_gcm_sha256 = {
     .available = 0,
     .name = "TLS_AES_128_GCM_SHA256",
@@ -810,8 +782,6 @@ static struct s2n_cipher_suite *s2n_all_cipher_suites[] = {
     &s2n_ecdhe_rsa_with_chacha20_poly1305_sha256,   /* 0xCC,0xA8 */
     &s2n_ecdhe_ecdsa_with_chacha20_poly1305_sha256, /* 0xCC,0xA9 */
     &s2n_dhe_rsa_with_chacha20_poly1305_sha256,     /* 0xCC,0xAA */
-    &s2n_ecdhe_bike_rsa_with_aes_256_gcm_sha384,    /* 0xFF,0x04 */
-    &s2n_ecdhe_sike_rsa_with_aes_256_gcm_sha384,    /* 0xFF,0x08 */
     &s2n_ecdhe_kyber_rsa_with_aes_256_gcm_sha384,   /* 0xFF,0x0C */
 };
 
@@ -858,8 +828,6 @@ static struct s2n_cipher_suite *s2n_all_tls12_cipher_suites[] = {
     &s2n_ecdhe_rsa_with_chacha20_poly1305_sha256,   /* 0xCC,0xA8 */
     &s2n_ecdhe_ecdsa_with_chacha20_poly1305_sha256, /* 0xCC,0xA9 */
     &s2n_dhe_rsa_with_chacha20_poly1305_sha256,     /* 0xCC,0xAA */
-    &s2n_ecdhe_bike_rsa_with_aes_256_gcm_sha384,    /* 0xFF,0x04 */
-    &s2n_ecdhe_sike_rsa_with_aes_256_gcm_sha384,    /* 0xFF,0x08 */
     &s2n_ecdhe_kyber_rsa_with_aes_256_gcm_sha384,   /* 0xFF,0x0C */
 };
 
@@ -1060,7 +1028,7 @@ int s2n_cipher_suites_init(void)
 }
 
 /* Reset any selected record algorithms */
-int s2n_cipher_suites_cleanup(void)
+S2N_RESULT s2n_cipher_suites_cleanup(void)
 {
     const int num_cipher_suites = sizeof(s2n_all_cipher_suites) / sizeof(struct s2n_cipher_suite *);
     for (int i = 0; i < num_cipher_suites; i++) {
@@ -1070,7 +1038,7 @@ int s2n_cipher_suites_cleanup(void)
 
         /* Release custom SSLv3 cipher suites */
         if (cur_suite->sslv3_cipher_suite != cur_suite) {
-            POSIX_GUARD(s2n_free_object((uint8_t **)&cur_suite->sslv3_cipher_suite, sizeof(struct s2n_cipher_suite)));
+            RESULT_GUARD_POSIX(s2n_free_object((uint8_t **)&cur_suite->sslv3_cipher_suite, sizeof(struct s2n_cipher_suite)));
         }
         cur_suite->sslv3_cipher_suite = NULL;
     }
@@ -1085,7 +1053,7 @@ int s2n_cipher_suites_cleanup(void)
 #endif
     }
 
-    return 0;
+    return S2N_RESULT_OK;
 }
 
 S2N_RESULT s2n_cipher_suite_from_iana(const uint8_t iana[static S2N_TLS_CIPHER_SUITE_LEN], struct s2n_cipher_suite **cipher_suite)
@@ -1118,12 +1086,30 @@ S2N_RESULT s2n_cipher_suite_from_iana(const uint8_t iana[static S2N_TLS_CIPHER_S
 int s2n_set_cipher_as_client(struct s2n_connection *conn, uint8_t wire[S2N_TLS_CIPHER_SUITE_LEN])
 {
     POSIX_ENSURE_REF(conn);
-    POSIX_ENSURE_REF(conn->secure.cipher_suite);
+    POSIX_ENSURE_REF(conn->secure);
+    POSIX_ENSURE_REF(conn->secure->cipher_suite);
 
     const struct s2n_security_policy *security_policy;
     POSIX_GUARD(s2n_connection_get_security_policy(conn, &security_policy));
     POSIX_ENSURE_REF(security_policy);
 
+    /**
+     * Ensure that the wire cipher suite is contained in the security
+     * policy, and thus was offered by the client.
+     *
+     *= https://tools.ietf.org/rfc/rfc8446#4.1.3
+     *# A client which receives a
+     *# cipher suite that was not offered MUST abort the handshake with an
+     *# "illegal_parameter" alert.
+     *
+     *= https://tools.ietf.org/rfc/rfc8446#4.1.4
+     *# A client which receives a cipher suite that was not offered MUST
+     *# abort the handshake.
+     *
+     *= https://tools.ietf.org/rfc/rfc8446#4.1.4
+     *# Upon receipt of a HelloRetryRequest, the client MUST check the
+     *# legacy_version, legacy_session_id_echo, cipher_suite
+     **/
     struct s2n_cipher_suite *cipher_suite = NULL;
     for (size_t i = 0; i < security_policy->cipher_preferences->count; i++) {
         const uint8_t *ours = security_policy->cipher_preferences->suites[i]->iana_value;
@@ -1133,6 +1119,7 @@ int s2n_set_cipher_as_client(struct s2n_connection *conn, uint8_t wire[S2N_TLS_C
         }
     }
     POSIX_ENSURE(cipher_suite != NULL, S2N_ERR_CIPHER_NOT_SUPPORTED);
+
     POSIX_ENSURE(cipher_suite->available, S2N_ERR_CIPHER_NOT_SUPPORTED);
 
     /** Clients MUST verify
@@ -1145,18 +1132,24 @@ int s2n_set_cipher_as_client(struct s2n_connection *conn, uint8_t wire[S2N_TLS_C
                      S2N_ERR_CIPHER_NOT_SUPPORTED);
     }
 
-    /* Verify cipher suite sent in server hello is the same as sent in hello retry */
+    /**
+     *= https://tools.ietf.org/rfc/rfc8446#4.1.4
+     *# Upon receiving
+     *# the ServerHello, clients MUST check that the cipher suite supplied in
+     *# the ServerHello is the same as that in the HelloRetryRequest and
+     *# otherwise abort the handshake with an "illegal_parameter" alert.
+     **/
     if (s2n_is_hello_retry_handshake(conn) && !s2n_is_hello_retry_message(conn)) {
-        POSIX_ENSURE(conn->secure.cipher_suite->iana_value == cipher_suite->iana_value, S2N_ERR_CIPHER_NOT_SUPPORTED);
+        POSIX_ENSURE(conn->secure->cipher_suite->iana_value == cipher_suite->iana_value, S2N_ERR_CIPHER_NOT_SUPPORTED);
         return S2N_SUCCESS;
     }
 
-    conn->secure.cipher_suite = cipher_suite;
+    conn->secure->cipher_suite = cipher_suite;
 
     /* For SSLv3 use SSLv3-specific ciphers */
     if (conn->actual_protocol_version == S2N_SSLv3) {
-        conn->secure.cipher_suite = conn->secure.cipher_suite->sslv3_cipher_suite;
-        POSIX_ENSURE_REF(conn->secure.cipher_suite);
+        conn->secure->cipher_suite = conn->secure->cipher_suite->sslv3_cipher_suite;
+        POSIX_ENSURE_REF(conn->secure->cipher_suite);
     }
 
     return 0;
@@ -1177,6 +1170,9 @@ static int s2n_wire_ciphers_contain(const uint8_t *match, const uint8_t *wire, u
 
 static int s2n_set_cipher_as_server(struct s2n_connection *conn, uint8_t *wire, uint32_t count, uint32_t cipher_suite_len)
 {
+    POSIX_ENSURE_REF(conn);
+    POSIX_ENSURE_REF(conn->secure);
+
     uint8_t renegotiation_info_scsv[S2N_TLS_CIPHER_SUITE_LEN] = { TLS_EMPTY_RENEGOTIATION_INFO_SCSV };
     struct s2n_cipher_suite *higher_vers_match = NULL;
 
@@ -1192,8 +1188,21 @@ static int s2n_set_cipher_as_server(struct s2n_connection *conn, uint8_t *wire, 
         }
     }
 
-    /* RFC5746 Section 3.6: A server must check if TLS_EMPTY_RENEGOTIATION_INFO_SCSV is included */
     if (s2n_wire_ciphers_contain(renegotiation_info_scsv, wire, count, cipher_suite_len)) {
+        /** For renegotiation handshakes:
+         *= https://tools.ietf.org/rfc/rfc5746#3.7
+         *# o  When a ClientHello is received, the server MUST verify that it
+         *#    does not contain the TLS_EMPTY_RENEGOTIATION_INFO_SCSV SCSV.  If
+         *#    the SCSV is present, the server MUST abort the handshake.
+         */
+        POSIX_ENSURE(!s2n_handshake_is_renegotiation(conn), S2N_ERR_BAD_MESSAGE);
+
+        /** For initial handshakes:
+         *= https://tools.ietf.org/rfc/rfc5746#3.6
+         *# o  When a ClientHello is received, the server MUST check if it
+         *#    includes the TLS_EMPTY_RENEGOTIATION_INFO_SCSV SCSV.  If it does,
+         *#    set the secure_renegotiation flag to TRUE.
+         */
         conn->secure_renegotiation = 1;
     }
 
@@ -1214,7 +1223,7 @@ static int s2n_set_cipher_as_server(struct s2n_connection *conn, uint8_t *wire, 
             }
 
             /* If connection is for SSLv3, use SSLv3 version of suites */
-            if (conn->client_protocol_version == S2N_SSLv3) {
+            if (conn->actual_protocol_version == S2N_SSLv3) {
                 match = match->sslv3_cipher_suite;
             }
 
@@ -1262,14 +1271,14 @@ static int s2n_set_cipher_as_server(struct s2n_connection *conn, uint8_t *wire, 
                 continue;
             }
 
-            conn->secure.cipher_suite = match;
+            conn->secure->cipher_suite = match;
             return S2N_SUCCESS;
         }
     }
 
     /* Settle for a cipher with a higher required proto version, if it was set */
     if (higher_vers_match) {
-        conn->secure.cipher_suite = higher_vers_match;
+        conn->secure->cipher_suite = higher_vers_match;
         return S2N_SUCCESS;
     }
 

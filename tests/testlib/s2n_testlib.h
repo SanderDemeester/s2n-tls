@@ -20,6 +20,7 @@
 #include "stuffer/s2n_stuffer.h"
 #include "tls/s2n_connection.h"
 
+extern const struct s2n_ecc_preferences ecc_preferences_for_retry;
 extern const struct s2n_security_policy security_policy_test_tls13_retry;
 
 /* Read and write hex */
@@ -60,6 +61,8 @@ int s2n_fd_set_blocking(int fd);
 int s2n_fd_set_non_blocking(int fd);
 
 int s2n_set_connection_hello_retry_flags(struct s2n_connection *conn);
+int s2n_connection_mark_extension_received(struct s2n_connection *conn, uint16_t iana_value);
+int s2n_connection_allow_response_extension(struct s2n_connection *conn, uint16_t iana_value);
 int s2n_connection_allow_all_response_extensions(struct s2n_connection *conn);
 int s2n_connection_set_all_protocol_versions(struct s2n_connection *conn, uint8_t version);
 S2N_RESULT s2n_set_all_mutually_supported_groups(struct s2n_connection *conn);
@@ -80,7 +83,7 @@ S2N_RESULT s2n_connection_set_test_early_secret(struct s2n_connection *conn, con
 S2N_RESULT s2n_connection_set_test_handshake_secret(struct s2n_connection *conn, const struct s2n_blob *handshake_secret);
 S2N_RESULT s2n_connection_set_test_master_secret(struct s2n_connection *conn, const struct s2n_blob *master_secret);
 
-#define S2N_MAX_TEST_PEM_SIZE 4096
+#define S2N_MAX_TEST_PEM_SIZE 8192
 
 /* These paths assume that the unit tests are run from inside the unit/ directory.
  * Absolute paths will be needed if test directories go to deeper levels.

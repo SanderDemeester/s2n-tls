@@ -158,12 +158,17 @@ ifeq ($(S2N_UNSAFE_FUZZING_MODE),1)
 
 endif
 
+# Disable strict-prototypes check in clang
+ifneq '' '$(findstring clang,$(CC))'
+	CFLAGS += -Wno-strict-prototypes
+	DEFAULT_CFLAGS += -Wno-strict-prototypes
+	CPPFLAGS += -Wno-strict-prototypes
+endif
+
 # If COV_TOOL isn't set, pick a default COV_TOOL depending on if the LLVM Marker File was created.
 ifndef COV_TOOL
 	ifneq ("$(wildcard $(LLVM_GCOV_MARKER_FILE))","")
 		COV_TOOL=llvm-gcov.sh
-	else
-		COV_TOOL=gcov
 	endif
 endif
 
@@ -179,7 +184,7 @@ try_compile = $(shell $(CC) $(CFLAGS) -c -o tmp.o $(1) > /dev/null 2>&1; echo $$
 # Determine if execinfo.h is available
 TRY_COMPILE_EXECINFO := $(call try_compile,$(S2N_ROOT)/tests/features/execinfo.c)
 ifeq ($(TRY_COMPILE_EXECINFO), 0)
-	DEFAULT_CFLAGS += -DS2N_HAVE_EXECINFO
+	DEFAULT_CFLAGS += -DS2N_STACKTRACE
 endif
 
 # Determine if cpuid.h is available
@@ -210,6 +215,12 @@ endif
 TRY_EVP_MD5_SHA1_HASH := $(call try_compile,$(S2N_ROOT)/tests/features/evp_md5_sha1.c)
 ifeq ($(TRY_EVP_MD5_SHA1_HASH), 0)
 	DEFAULT_CFLAGS += -DS2N_LIBCRYPTO_SUPPORTS_EVP_MD5_SHA1_HASH
+endif
+
+# Determine if EVP_md5_sha1 is available
+TRY_EVP_RC4 := $(call try_compile,$(S2N_ROOT)/tests/features/evp_rc4.c)
+ifeq ($(TRY_EVP_RC4), 0)
+	DEFAULT_CFLAGS += -DS2N_LIBCRYPTO_SUPPORTS_EVP_RC4
 endif
 
 # Determine if EVP_MD_CTX_set_pkey_ctx is available
@@ -247,10 +258,6 @@ INDENTOPTS = -npro -kr -i4 -ts4 -nut -sob -l180 -ss -ncs -cp1
 .PHONY : indentsource
 indentsource:
 	( for source in ${SOURCES} ; do ${INDENT} ${INDENTOPTS} $$source; done )
-
-.PHONY : gcov
-gcov: 
-	( for source in ${SOURCES} ; do $(COV_TOOL) $$source;  done )
 
 .PHONY : lcov
 lcov: 

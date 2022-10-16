@@ -24,7 +24,7 @@
 #include "utils/s2n_map.h"
 #include "utils/s2n_safety.h"
 
-#if S2N_HAVE_EXECINFO
+#ifdef S2N_STACKTRACE
 #   include <execinfo.h>
 #endif
 
@@ -94,7 +94,11 @@ static const char *no_such_error = "Internal s2n error";
     ERR_ENTRY(S2N_ERR_NON_EMPTY_RENEGOTIATION_INFO, "renegotiation_info should be empty") \
     ERR_ENTRY(S2N_ERR_RECORD_LIMIT, "TLS record limit reached") \
     ERR_ENTRY(S2N_ERR_CERT_UNTRUSTED, "Certificate is untrusted") \
+    ERR_ENTRY(S2N_ERR_CERT_REVOKED, "Certificate has been revoked by the CA") \
+    ERR_ENTRY(S2N_ERR_CERT_EXPIRED, "Certificate has expired") \
     ERR_ENTRY(S2N_ERR_CERT_TYPE_UNSUPPORTED, "Certificate Type is unsupported") \
+    ERR_ENTRY(S2N_ERR_CERT_INVALID, "Certificate is invalid") \
+    ERR_ENTRY(S2N_ERR_CERT_MAX_CHAIN_DEPTH_EXCEEDED, "The maximum certificate chain depth has been exceeded") \
     ERR_ENTRY(S2N_ERR_INVALID_MAX_FRAG_LEN, "invalid Maximum Fragmentation Length encountered") \
     ERR_ENTRY(S2N_ERR_MAX_FRAG_LEN_MISMATCH, "Negotiated Maximum Fragmentation Length from server does not match the requested length by client") \
     ERR_ENTRY(S2N_ERR_PROTOCOL_VERSION_UNSUPPORTED, "TLS protocol version is not supported by configuration") \
@@ -268,6 +272,13 @@ static const char *no_such_error = "Internal s2n error";
     ERR_ENTRY(S2N_ERR_FORK_DETECTION_INIT, "Fork detection initialization failed") \
     ERR_ENTRY(S2N_ERR_RETRIEVE_FORK_GENERATION_NUMBER, "Retrieving fork generation number failed") \
     ERR_ENTRY(S2N_ERR_SECRET_SCHEDULE_STATE, "Correct inputs to secret calculation not available") \
+    ERR_ENTRY(S2N_ERR_LIBCRYPTO_VERSION_NUMBER_MISMATCH, "The libcrypto major version number seen at compile-time is different from the major version number seen at run-time") \
+    ERR_ENTRY(S2N_ERR_LIBCRYPTO_VERSION_NAME_MISMATCH, "The libcrypto major version name seen at compile-time is different from the major version name seen at run-time") \
+    ERR_ENTRY(S2N_ERR_OSSL_PROVIDER, "Failed to load or unload an openssl provider") \
+    ERR_ENTRY(S2N_ERR_CERT_OWNERSHIP, "The ownership of the certificate chain is incompatible with the operation") \
+    ERR_ENTRY(S2N_ERR_INTERNAL_LIBCRYPTO_ERROR, "An internal error has occurred in the libcrypto API") \
+    ERR_ENTRY(S2N_ERR_NO_RENEGOTIATION, "Only secure, server-initiated renegotiation is supported") \
+    ERR_ENTRY(S2N_ERR_APP_DATA_BLOCKED, "Blocked on application data during handshake") \
 /* clang-format on */
 
 #define ERR_STR_CASE(ERR, str) case ERR: return str;
@@ -365,7 +376,7 @@ int s2n_stack_traces_enabled_set(bool newval)
     return S2N_SUCCESS;
 }
 
-#ifdef S2N_HAVE_EXECINFO
+#ifdef S2N_STACKTRACE
 
 #define MAX_BACKTRACE_DEPTH 20
 __thread struct s2n_stacktrace tl_stacktrace = {0};
@@ -416,7 +427,7 @@ int s2n_print_stacktrace(FILE *fptr)
     return S2N_SUCCESS;
 }
 
-#else /* !S2N_HAVE_EXECINFO */
+#else /* !S2N_STACKTRACE */
 int s2n_free_stacktrace(void)
 {
     S2N_ERROR(S2N_ERR_UNIMPLEMENTED);
@@ -441,4 +452,4 @@ int s2n_print_stacktrace(FILE *fptr)
 {
     S2N_ERROR(S2N_ERR_UNIMPLEMENTED);
 }
-#endif /* S2N_HAVE_EXECINFO */
+#endif /* S2N_STACKTRACE */

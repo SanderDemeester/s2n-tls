@@ -143,6 +143,9 @@ uint8_t s2n_handshake_is_hash_required(struct s2n_handshake *handshake, s2n_hash
  */
 int s2n_conn_update_required_handshake_hashes(struct s2n_connection *conn)
 {
+    POSIX_ENSURE_REF(conn);
+    POSIX_ENSURE_REF(conn->secure);
+
     /* Clear all of the required hashes */
     memset(conn->handshake.required_hash_algs, 0, sizeof(conn->handshake.required_hash_algs));
 
@@ -170,7 +173,7 @@ int s2n_conn_update_required_handshake_hashes(struct s2n_connection *conn)
     case S2N_TLS13:
     {
         /* For TLS 1.2 and TLS 1.3, the cipher suite defines the PRF hash alg */
-        s2n_hmac_algorithm prf_alg = conn->secure.cipher_suite->prf_alg;
+        s2n_hmac_algorithm prf_alg = conn->secure->cipher_suite->prf_alg;
         s2n_hash_algorithm hash_alg;
         POSIX_GUARD(s2n_hmac_hash_alg(prf_alg, &hash_alg));
         POSIX_GUARD(s2n_handshake_require_hash(&conn->handshake, hash_alg));
@@ -342,4 +345,33 @@ S2N_RESULT s2n_handshake_validate(const struct s2n_handshake *s2n_handshake)
     RESULT_DEBUG_ENSURE(s2n_handshake->handshake_type < 256, S2N_ERR_SAFETY);
     RESULT_DEBUG_ENSURE(s2n_handshake->message_number >= 0 && s2n_handshake->message_number < 32, S2N_ERR_SAFETY);
     return S2N_RESULT_OK;
+}
+
+S2N_RESULT s2n_handshake_set_finished_len(struct s2n_connection *conn, uint8_t len)
+{
+    RESULT_ENSURE_REF(conn);
+    RESULT_ENSURE_GT(len, 0);
+    RESULT_ENSURE_LTE(len, sizeof(conn->handshake.server_finished));
+    RESULT_ENSURE_LTE(len, sizeof(conn->handshake.client_finished));
+
+    /*
+     * We maintain a version of the "finished" / "verify_data" field
+     * for both the client and server, so this method will be called
+     * once for the client version and once for the server version.
+     *
+     * The lengths of both versions must match, or something has
+     * gone wrong in our implementation.
+     */
+    uint8_t *finished_length = &conn->handshake.finished_len;
+    if (*finished_length == 0) {
+        *finished_length = len;
+    }
+    RESULT_ENSURE_EQ(*finished_length, len);
+
+    return S2N_RESULT_OK;
+}
+
+bool s2n_handshake_is_renegotiation(struct s2n_connection *conn)
+{
+    return s2n_in_unit_test() && conn && conn->handshake.renegotiation;
 }

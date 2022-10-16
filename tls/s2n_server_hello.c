@@ -37,6 +37,7 @@
 
 #include "utils/s2n_safety.h"
 #include "utils/s2n_random.h"
+#include "utils/s2n_bitmap.h"
 
 /* From RFC5246 7.4.1.2. */
 #define S2N_TLS_COMPRESSION_METHOD_NULL 0
@@ -51,7 +52,7 @@ const uint8_t tls11_downgrade_protection_bytes[] = {
     0x44, 0x4F, 0x57, 0x4E, 0x47, 0x52, 0x44, 0x00
 };
 
-static int s2n_hello_retry_validate(struct s2n_connection *conn) {
+static int s2n_random_value_is_hello_retry(struct s2n_connection *conn) {
     POSIX_ENSURE_REF(conn);
 
     POSIX_ENSURE(memcmp(hello_retry_req_random, conn->handshake_params.server_random, S2N_TLS_RANDOM_DATA_LEN) == 0,
@@ -97,6 +98,7 @@ static int s2n_server_add_downgrade_mechanism(struct s2n_connection *conn) {
 static int s2n_server_hello_parse(struct s2n_connection *conn)
 {
     POSIX_ENSURE_REF(conn);
+    POSIX_ENSURE_REF(conn->secure);
 
     struct s2n_stuffer *in = &conn->handshake.io;
     uint8_t compression_method;
@@ -107,9 +109,32 @@ static int s2n_server_hello_parse(struct s2n_connection *conn)
     POSIX_GUARD(s2n_stuffer_read_bytes(in, protocol_version, S2N_TLS_PROTOCOL_VERSION_LEN));
     POSIX_GUARD(s2n_stuffer_read_bytes(in, conn->handshake_params.server_random, S2N_TLS_RANDOM_DATA_LEN));
 
-    /* If the client receives a second HelloRetryRequest in the same connection, it MUST send an error. */
-    if (s2n_hello_retry_validate(conn) == S2N_SUCCESS) {
+    uint8_t legacy_version = (uint8_t)(protocol_version[0] * 10) + protocol_version[1];
+
+    /**
+     *= https://tools.ietf.org/rfc/rfc8446#4.1.3
+     *# Upon receiving a message with type server_hello, implementations MUST
+     *# first examine the Random value and, if it matches this value, process
+     *# it as described in Section 4.1.4).
+     **/
+    if (s2n_random_value_is_hello_retry(conn) == S2N_SUCCESS) {
+
+        /**
+         *= https://tools.ietf.org/rfc/rfc8446#4.1.4
+         *# If a client receives a second
+         *# HelloRetryRequest in the same connection (i.e., where the ClientHello
+         *# was itself in response to a HelloRetryRequest), it MUST abort the
+         *# handshake with an "unexpected_message" alert.
+         **/
         POSIX_ENSURE(!s2n_is_hello_retry_handshake(conn), S2N_ERR_INVALID_HELLO_RETRY);
+
+        /**
+         *= https://tools.ietf.org/rfc/rfc8446#4.1.4
+         *# Upon receipt of a HelloRetryRequest, the client MUST check the
+         *# legacy_version
+         **/
+        POSIX_ENSURE(legacy_version == S2N_TLS12, S2N_ERR_INVALID_HELLO_RETRY);
+
         POSIX_GUARD(s2n_set_hello_retry_required(conn));
     }
 
@@ -121,6 +146,17 @@ static int s2n_server_hello_parse(struct s2n_connection *conn)
     POSIX_ENSURE_REF(cipher_suite_wire);
 
     POSIX_GUARD(s2n_stuffer_read_uint8(in, &compression_method));
+
+    /**
+     *= https://tools.ietf.org/rfc/rfc8446#4.1.3
+     *# legacy_compression_method:  A single byte which MUST have the
+     *# value 0.
+     *
+     *= https://tools.ietf.org/rfc/rfc8446#4.1.4
+     *# Upon receipt of a HelloRetryRequest, the client MUST check the
+     *# legacy_version, legacy_session_id_echo, cipher_suite, and
+     *# legacy_compression_method
+     **/
     S2N_ERROR_IF(compression_method != S2N_TLS_COMPRESSION_METHOD_NULL, S2N_ERR_BAD_MESSAGE);
 
     bool session_ids_match = session_id_len != 0 && session_id_len == conn->session_id_len
@@ -131,15 +167,43 @@ static int s2n_server_hello_parse(struct s2n_connection *conn)
 
     POSIX_GUARD(s2n_server_extensions_recv(conn, in));
 
+    /**
+    *= https://tools.ietf.org/rfc/rfc8446#4.1.4
+    *# The server's extensions MUST contain "supported_versions".
+    **/
+    if (s2n_is_hello_retry_message(conn)) {
+        s2n_extension_type_id supported_versions_id = s2n_unsupported_extension;
+        POSIX_GUARD(s2n_extension_supported_iana_value_to_id(TLS_EXTENSION_SUPPORTED_VERSIONS, &supported_versions_id));
+        POSIX_ENSURE(S2N_CBIT_TEST(conn->extension_responses_received, supported_versions_id),
+                     S2N_ERR_MISSING_EXTENSION);
+    }
+
     if (conn->server_protocol_version >= S2N_TLS13) {
+        POSIX_ENSURE(!conn->handshake.renegotiation, S2N_ERR_PROTOCOL_VERSION_UNSUPPORTED);
+
+        /**
+         *= https://www.rfc-editor.org/rfc/rfc8446#section-4.1.3
+         *# A client which
+         *# receives a legacy_session_id_echo field that does not match what
+         *# it sent in the ClientHello MUST abort the handshake with an
+         *# "illegal_parameter" alert.
+         *
+         *= https://tools.ietf.org/rfc/rfc8446#4.1.4
+         *# Upon receipt of a HelloRetryRequest, the client MUST check the
+         *# legacy_version, legacy_session_id_echo
+         **/
         POSIX_ENSURE(session_ids_match || (session_id_len == 0 && conn->session_id_len == 0), S2N_ERR_BAD_MESSAGE);
+
         conn->actual_protocol_version = conn->server_protocol_version;
         POSIX_GUARD(s2n_set_cipher_as_client(conn, cipher_suite_wire));
     } else {
-        conn->server_protocol_version = (uint8_t)(protocol_version[0] * 10) + protocol_version[1];
+        conn->server_protocol_version = legacy_version;
 
         POSIX_ENSURE(!s2n_client_detect_downgrade_mechanism(conn), S2N_ERR_PROTOCOL_DOWNGRADE_DETECTED);
         POSIX_ENSURE(!s2n_connection_is_quic_enabled(conn), S2N_ERR_PROTOCOL_VERSION_UNSUPPORTED);
+
+        /* Hello retries are only supported in >=TLS1.3. */
+        POSIX_ENSURE(!s2n_is_hello_retry_handshake(conn), S2N_ERR_BAD_MESSAGE);
 
         /*
          *= https://tools.ietf.org/rfc/rfc8446#appendix-D.3
@@ -170,7 +234,7 @@ static int s2n_server_hello_parse(struct s2n_connection *conn)
         if (session_ids_match) {
             /* check if the resumed session state is valid */
             S2N_ERROR_IF(conn->actual_protocol_version != actual_protocol_version, S2N_ERR_BAD_MESSAGE);
-            S2N_ERROR_IF(memcmp(conn->secure.cipher_suite->iana_value, cipher_suite_wire, S2N_TLS_CIPHER_SUITE_LEN) != 0, S2N_ERR_BAD_MESSAGE);
+            S2N_ERROR_IF(memcmp(conn->secure->cipher_suite->iana_value, cipher_suite_wire, S2N_TLS_CIPHER_SUITE_LEN) != 0, S2N_ERR_BAD_MESSAGE);
 
             /* Session is resumed */
             conn->client_session_resumed = 1;
@@ -234,6 +298,7 @@ int s2n_server_hello_recv(struct s2n_connection *conn)
 int s2n_server_hello_write_message(struct s2n_connection *conn)
 {
     POSIX_ENSURE_REF(conn);
+    POSIX_ENSURE_REF(conn->secure);
 
     /* The actual_protocol_version is set while processing the CLIENT_HELLO message, so
      * it could be S2N_TLS13. SERVER_HELLO should always respond with the legacy version.
@@ -247,7 +312,7 @@ int s2n_server_hello_write_message(struct s2n_connection *conn)
     POSIX_GUARD(s2n_stuffer_write_bytes(&conn->handshake.io, conn->handshake_params.server_random, S2N_TLS_RANDOM_DATA_LEN));
     POSIX_GUARD(s2n_stuffer_write_uint8(&conn->handshake.io, conn->session_id_len));
     POSIX_GUARD(s2n_stuffer_write_bytes(&conn->handshake.io, conn->session_id, conn->session_id_len));
-    POSIX_GUARD(s2n_stuffer_write_bytes(&conn->handshake.io, conn->secure.cipher_suite->iana_value, S2N_TLS_CIPHER_SUITE_LEN));
+    POSIX_GUARD(s2n_stuffer_write_bytes(&conn->handshake.io, conn->secure->cipher_suite->iana_value, S2N_TLS_CIPHER_SUITE_LEN));
     POSIX_GUARD(s2n_stuffer_write_uint8(&conn->handshake.io, S2N_TLS_COMPRESSION_METHOD_NULL));
 
     return 0;

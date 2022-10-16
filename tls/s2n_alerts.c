@@ -54,6 +54,14 @@ static S2N_RESULT s2n_translate_protocol_error_to_alert(int error_code, uint8_t 
          */
         S2N_ALERT_CASE(S2N_ERR_BAD_MESSAGE, S2N_TLS_ALERT_UNEXPECTED_MESSAGE);
 
+        /* For errors involving secure renegotiation:
+         *= https://tools.ietf.org/rfc/rfc5746#3.4
+         *# Note: later in Section 3, "abort the handshake" is used as
+         *# shorthand for "send a fatal handshake_failure alert and
+         *# terminate the connection".
+         */
+        S2N_ALERT_CASE(S2N_ERR_NO_RENEGOTIATION, S2N_TLS_ALERT_HANDSHAKE_FAILURE);
+
         /* TODO: Add mappings for other protocol errors.
          */
         S2N_NO_ALERT(S2N_ERR_ENCRYPT);
@@ -96,7 +104,11 @@ static S2N_RESULT s2n_translate_protocol_error_to_alert(int error_code, uint8_t 
         S2N_NO_ALERT(S2N_ERR_NON_EMPTY_RENEGOTIATION_INFO);
         S2N_NO_ALERT(S2N_ERR_RECORD_LIMIT);
         S2N_NO_ALERT(S2N_ERR_CERT_UNTRUSTED);
+        S2N_NO_ALERT(S2N_ERR_CERT_REVOKED);
+        S2N_NO_ALERT(S2N_ERR_CERT_EXPIRED);
         S2N_NO_ALERT(S2N_ERR_CERT_TYPE_UNSUPPORTED);
+        S2N_NO_ALERT(S2N_ERR_CERT_INVALID);
+        S2N_NO_ALERT(S2N_ERR_CERT_MAX_CHAIN_DEPTH_EXCEEDED);
         S2N_NO_ALERT(S2N_ERR_INVALID_MAX_FRAG_LEN);
         S2N_NO_ALERT(S2N_ERR_MAX_FRAG_LEN_MISMATCH);
         S2N_NO_ALERT(S2N_ERR_PROTOCOL_VERSION_UNSUPPORTED);
@@ -124,7 +136,7 @@ static bool s2n_alerts_supported(struct s2n_connection *conn)
     return !s2n_connection_is_quic_enabled(conn);
 }
 
-static bool s2n_handle_as_warning(struct s2n_connection *conn, uint8_t level, uint8_t type)
+static bool s2n_process_as_warning(struct s2n_connection *conn, uint8_t level, uint8_t type)
 {
     /* Only TLS1.2 considers the alert level. The alert level field is
      * considered deprecated in TLS1.3. */
@@ -137,6 +149,20 @@ static bool s2n_handle_as_warning(struct s2n_connection *conn, uint8_t level, ui
      * We need to treat it as a warning regardless of alert_behavior to avoid marking
      * correctly-closed connections as failed. */
     return type == S2N_TLS_ALERT_USER_CANCELED;
+}
+
+S2N_RESULT s2n_alerts_close_if_fatal(struct s2n_connection *conn, struct s2n_blob *alert)
+{
+    RESULT_ENSURE_REF(conn);
+    RESULT_ENSURE_REF(alert);
+    RESULT_ENSURE_EQ(alert->size, S2N_ALERT_LENGTH);
+    /* Only one alert should currently be treated as a warning */
+    if (alert->data[1] == S2N_TLS_ALERT_NO_RENEGOTIATION) {
+        RESULT_ENSURE_EQ(alert->data[0], S2N_TLS_ALERT_LEVEL_WARNING);
+        return S2N_RESULT_OK;
+    }
+    conn->closing = true;
+    return S2N_RESULT_OK;
 }
 
 int s2n_error_get_alert(int error, uint8_t *alert)
@@ -194,7 +220,7 @@ int s2n_process_alert_fragment(struct s2n_connection *conn)
             }
 
             /* Ignore warning-level alerts if we're in warning-tolerant mode */
-            if (s2n_handle_as_warning(conn, conn->alert_in_data[0], conn->alert_in_data[1])) {
+            if (s2n_process_as_warning(conn, conn->alert_in_data[0], conn->alert_in_data[1])) {
                 POSIX_GUARD(s2n_stuffer_wipe(&conn->alert_in));
                 return 0;
             }
@@ -270,4 +296,22 @@ int s2n_queue_reader_unsupported_protocol_version_alert(struct s2n_connection *c
 int s2n_queue_reader_handshake_failure_alert(struct s2n_connection *conn)
 {
     return s2n_queue_reader_alert(conn, S2N_TLS_ALERT_LEVEL_FATAL, S2N_TLS_ALERT_HANDSHAKE_FAILURE);
+}
+
+S2N_RESULT s2n_queue_reader_no_renegotiation_alert(struct s2n_connection *conn)
+{
+    /**
+     *= https://tools.ietf.org/rfc/rfc5746#4.5
+     *# SSLv3 does not define the "no_renegotiation" alert (and does
+     *# not offer a way to indicate a refusal to renegotiate at a "warning"
+     *# level).  SSLv3 clients that refuse renegotiation SHOULD use a fatal
+     *# handshake_failure alert.
+     **/
+    if (s2n_connection_get_protocol_version(conn) == S2N_SSLv3) {
+        RESULT_GUARD_POSIX(s2n_queue_reader_alert(conn, S2N_TLS_ALERT_LEVEL_FATAL, S2N_TLS_ALERT_HANDSHAKE_FAILURE));
+        return S2N_RESULT_OK;
+    }
+
+    RESULT_GUARD_POSIX(s2n_queue_reader_alert(conn, S2N_TLS_ALERT_LEVEL_WARNING, S2N_TLS_ALERT_NO_RENEGOTIATION));
+    return S2N_RESULT_OK;
 }

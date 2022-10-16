@@ -1,4 +1,4 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#
 #
 # Licensed under the Apache License, Version 2.0 (the "License"). You may not use
 # this file except in compliance with the License. A copy of the License is
@@ -16,7 +16,7 @@
 MAX_ARR_LEN = 10
 
 # Bound for copy or dont must be at at least three higher than the maximum array length
-BOUND = $(MAX_ARR_LEN) + 3
+BOUND = $(MAX_ARR_LEN)+3
 
 DEFINES += -DMAX_ARR_LEN=$(MAX_ARR_LEN)
 DEFINES += -DBOUND=$(BOUND)

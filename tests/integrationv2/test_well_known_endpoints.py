@@ -16,17 +16,17 @@ ENDPOINTS = [
     "s3.us-west-2.amazonaws.com",
     "www.apple.com",
     "www.att.com",
-    "www.badssl.com",
-    "mozilla-intermediate.badssl.com",
-    "mozilla-modern.badssl.com",
-    "rsa2048.badssl.com",
-    "rsa4096.badssl.com",
-    "sha256.badssl.com",
-    #"sha384.badssl.com",
-    #"sha512.badssl.com",
-    "tls-v1-0.badssl.com",
-    "tls-v1-1.badssl.com",
-    "tls-v1-2.badssl.com",
+#    "www.badssl.com",
+#    "mozilla-intermediate.badssl.com",
+#    "mozilla-modern.badssl.com",
+#    "rsa2048.badssl.com",
+#    "rsa4096.badssl.com",
+#    "sha256.badssl.com",
+#    "sha384.badssl.com",
+#    "sha512.badssl.com",
+#    "tls-v1-0.badssl.com",
+#    "tls-v1-1.badssl.com",
+#    "tls-v1-2.badssl.com",
     "www.cloudflare.com",
     "www.ebay.com",
     "www.f5.com",
@@ -60,15 +60,15 @@ CIPHERS = [
 if pq_enabled():
     EXPECTED_RESULTS = {
         ("kms.us-east-1.amazonaws.com", Ciphers.KMS_PQ_TLS_1_0_2019_06):
-            {"cipher": "ECDHE-BIKE-RSA-AES256-GCM-SHA384", "kem": "BIKE1r1-Level1"},
+            {"cipher": "ECDHE-RSA-AES256-GCM-SHA384", "kem": "NONE"},
         ("kms.us-east-1.amazonaws.com", Ciphers.PQ_SIKE_TEST_TLS_1_0_2019_11):
-            {"cipher": "ECDHE-SIKE-RSA-AES256-GCM-SHA384", "kem": "SIKEp503r1-KEM"},
+            {"cipher": "ECDHE-RSA-AES256-GCM-SHA384", "kem": "NONE"},
         ("kms.us-east-1.amazonaws.com", Ciphers.KMS_PQ_TLS_1_0_2020_07):
-            {"cipher": "ECDHE-KYBER-RSA-AES256-GCM-SHA384", "kem": "kyber512r2"},
+            {"cipher": "ECDHE-KYBER-RSA-AES256-GCM-SHA384", "kem": "kyber512r3"},
         ("kms.us-east-1.amazonaws.com", Ciphers.KMS_PQ_TLS_1_0_2020_02):
-            {"cipher": "ECDHE-BIKE-RSA-AES256-GCM-SHA384", "kem": "BIKE1r2-Level1"},
+            {"cipher": "ECDHE-RSA-AES256-GCM-SHA384", "kem": "NONE"},
         ("kms.us-east-1.amazonaws.com", Ciphers.PQ_SIKE_TEST_TLS_1_0_2020_02):
-            {"cipher": "ECDHE-SIKE-RSA-AES256-GCM-SHA384", "kem": "SIKEp434r3-KEM"},
+            {"cipher": "ECDHE-RSA-AES256-GCM-SHA384", "kem": "NONE"},
     }
 else:
     EXPECTED_RESULTS = {
@@ -109,7 +109,8 @@ def test_well_known_endpoints(managed_process, protocol, endpoint, provider, cip
 
     # expect_stderr=True because S2N sometimes receives OCSP responses:
     # https://github.com/aws/s2n-tls/blob/14ed186a13c1ffae7fbb036ed5d2849ce7c17403/bin/echo.c#L180-L184
-    client = managed_process(provider, client_options, timeout=5, expect_stderr=True)
+    client = managed_process(provider, client_options,
+                             timeout=5, expect_stderr=True)
 
     expected_result = EXPECTED_RESULTS.get((endpoint, cipher), None)
 

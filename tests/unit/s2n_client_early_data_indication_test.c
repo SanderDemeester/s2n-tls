@@ -96,13 +96,19 @@ int main(int argc, char **argv)
             EXPECT_SUCCESS(s2n_connection_free(conn));
         }
 
-        /** Don't send when performing a retry.
+        /**
+         * Don't send when performing a retry.
          *
          *= https://tools.ietf.org/rfc/rfc8446#section-4.2.10
          *= type=test
          *# A client MUST NOT include the
          *# "early_data" extension in its followup ClientHello.
-         */
+         *
+         *= https://tools.ietf.org/rfc/rfc8446#4.1.2
+         *= type=test
+         *# -  Removing the "early_data" extension (Section 4.2.10) if one was
+         *#    present.  Early data is not permitted after a HelloRetryRequest.
+         **/
         {
             struct s2n_connection *conn = s2n_connection_new(S2N_CLIENT);
             EXPECT_NOT_NULL(conn);
@@ -164,7 +170,7 @@ int main(int argc, char **argv)
             EXPECT_SUCCESS(s2n_connection_set_cipher_preferences(conn, "default_tls13"));
             EXPECT_SUCCESS(s2n_connection_set_early_data_expected(conn));
 
-            EXPECT_OK(s2n_append_test_psk_with_early_data(conn, nonzero_max_early_data, &s2n_rsa_with_rc4_128_md5));
+            EXPECT_OK(s2n_append_test_psk_with_early_data(conn, nonzero_max_early_data, &s2n_rsa_with_3des_ede_cbc_sha));
             EXPECT_FALSE(s2n_client_early_data_indication_extension.should_send(conn));
 
             EXPECT_OK(s2n_psk_parameters_wipe(&conn->psk_params));
@@ -439,6 +445,9 @@ int main(int argc, char **argv)
              * is a hello retry message, which requires that we be at a specific message number. */
             server_conn->handshake.message_number = 2;
             client_conn->handshake.message_number = 2;
+
+            /* Update the selected_group to ensure the HRR is valid */
+            client_conn->kex_params.client_ecc_evp_params.negotiated_curve = &s2n_ecc_curve_secp521r1;
 
             EXPECT_SUCCESS(s2n_server_hello_retry_send(server_conn));
             EXPECT_SUCCESS(s2n_stuffer_copy(&server_conn->handshake.io, &client_conn->handshake.io,

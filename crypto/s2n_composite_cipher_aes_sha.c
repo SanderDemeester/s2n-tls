@@ -26,15 +26,18 @@
 #include "utils/s2n_safety.h"
 #include "utils/s2n_blob.h"
 
-/* LibreSSL, BoringSSL and AWS-LC support the cipher, but the interface is different from Openssl's. We
- * should define a separate s2n_cipher struct for LibreSSL, BoringSSL and AWS-LC.
+/* LibreSSL and BoringSSL support the cipher, but the interface is different from Openssl's. We
+ * should define a separate s2n_cipher struct for LibreSSL and BoringSSL.
  */
-#if !defined(LIBRESSL_VERSION_NUMBER) && !defined(OPENSSL_IS_BORINGSSL) && !defined(OPENSSL_IS_AWSLC)
+#if !defined(LIBRESSL_VERSION_NUMBER) && !defined(OPENSSL_IS_BORINGSSL)
 /* Symbols for AES-SHA1-CBC composite ciphers were added in Openssl 1.0.1
  * These composite ciphers exhibit erratic behavior in LibreSSL releases.
  */
-#if S2N_OPENSSL_VERSION_AT_LEAST(1,0,1) 
+#if S2N_OPENSSL_VERSION_AT_LEAST(1,0,1)
 #define S2N_AES_SHA1_COMPOSITE_AVAILABLE
+#endif
+#if defined(AWSLC_API_VERSION) && (AWSLC_API_VERSION <= 17)
+#undef S2N_AES_SHA1_COMPOSITE_AVAILABLE
 #endif
 /* Symbols for AES-SHA256-CBC composite ciphers were added in Openssl 1.0.2
  * See https://www.openssl.org/news/cl102.txt
@@ -43,7 +46,9 @@
 #if S2N_OPENSSL_VERSION_AT_LEAST(1,0,2)
 #define S2N_AES_SHA256_COMPOSITE_AVAILABLE
 #endif
-
+#if defined(AWSLC_API_VERSION) && (AWSLC_API_VERSION <= 17)
+#undef S2N_AES_SHA256_COMPOSITE_AVAILABLE
+#endif
 #endif
 
 /* Silly accessors, but we avoid using version macro guards in multiple places */
@@ -125,11 +130,11 @@ static uint8_t s2n_composite_cipher_aes256_sha256_available(void)
 static int s2n_composite_cipher_aes_sha_initial_hmac(struct s2n_session_key *key, uint8_t *sequence_number, uint8_t content_type,
                                                      uint16_t protocol_version, uint16_t payload_and_eiv_len, int *extra)
 {
-    /* BoringSSL and AWS-LC do not support these composite ciphers with the existing EVP API, and they took out the
-     * constants used below. This method should never be called with BoringSSL or AWS-LC because the isAvaliable checked
-     * will fail. Instead of defining a possibly dangerous default or hard coding this to 0x16 error out with BoringSSL and AWS-LC.
+    /* BoringSSL and AWS-LC(AWSLC_API_VERSION <= 17) do not support these composite ciphers with the existing EVP API, and they took out the
+     * constants used below. This method should never be called with BoringSSL or AWS-LC(AWSLC_API_VERSION <= 17) because the isAvaliable checked
+     * will fail. Instead of defining a possibly dangerous default or hard coding this to 0x16 error out with BoringSSL and AWS-LC(AWSLC_API_VERSION <= 17).
      */
-#if defined(OPENSSL_IS_BORINGSSL) || defined(OPENSSL_IS_AWSLC)
+#if defined(OPENSSL_IS_BORINGSSL) || (defined(AWSLC_API_VERSION) && (AWSLC_API_VERSION <= 17))
   POSIX_BAIL(S2N_ERR_NO_SUPPORTED_LIBCRYPTO_API);
 #else
     uint8_t ctrl_buf[S2N_TLS12_AAD_LEN];
@@ -162,7 +167,12 @@ static int s2n_composite_cipher_aes_sha_encrypt(struct s2n_session_key *key, str
     POSIX_ENSURE_EQ(out->size, in->size);
 
     POSIX_GUARD_OSSL(EVP_EncryptInit_ex(key->evp_cipher_ctx, NULL, NULL, NULL, iv->data), S2N_ERR_KEY_INIT);
-    POSIX_GUARD_OSSL(EVP_Cipher(key->evp_cipher_ctx, out->data, in->data, in->size), S2N_ERR_ENCRYPT);
+
+    /* len is set by EVP_EncryptUpdate and checked post operation */
+    int len = 0;
+    POSIX_GUARD_OSSL(EVP_EncryptUpdate(key->evp_cipher_ctx, out->data, &len, in->data, in->size), S2N_ERR_ENCRYPT);
+
+    S2N_ERROR_IF(len != in->size, S2N_ERR_ENCRYPT);
 
     return 0;
 }
@@ -170,9 +180,12 @@ static int s2n_composite_cipher_aes_sha_encrypt(struct s2n_session_key *key, str
 static int s2n_composite_cipher_aes_sha_decrypt(struct s2n_session_key *key, struct s2n_blob *iv, struct s2n_blob *in, struct s2n_blob *out)
 {
     POSIX_ENSURE_EQ(out->size, in->size);
-
     POSIX_GUARD_OSSL(EVP_DecryptInit_ex(key->evp_cipher_ctx, NULL, NULL, NULL, iv->data), S2N_ERR_KEY_INIT);
-    POSIX_GUARD_OSSL(EVP_Cipher(key->evp_cipher_ctx, out->data, in->data, in->size), S2N_ERR_DECRYPT);
+
+    /* len is set by EVP_DecryptUpdate. It is not checked here but padding is manually removed and therefore
+     * the decryption operation is validated. */
+    int len = 0;
+    POSIX_GUARD_OSSL(EVP_DecryptUpdate(key->evp_cipher_ctx, out->data, &len, in->data, in->size), S2N_ERR_DECRYPT);
 
     return 0;
 }
@@ -200,7 +213,7 @@ static int s2n_composite_cipher_aes128_sha_set_encryption_key(struct s2n_session
 {
     POSIX_ENSURE_EQ(in->size, 16);
 
-    EVP_CIPHER_CTX_set_padding(key->evp_cipher_ctx, EVP_CIPH_NO_PADDING);
+    EVP_CIPHER_CTX_set_padding(key->evp_cipher_ctx, 0);
     EVP_EncryptInit_ex(key->evp_cipher_ctx, s2n_evp_aes_128_cbc_hmac_sha1(), NULL, in->data, NULL);
 
     return 0;
@@ -210,7 +223,7 @@ static int s2n_composite_cipher_aes128_sha_set_decryption_key(struct s2n_session
 {
     POSIX_ENSURE_EQ(in->size, 16);
 
-    EVP_CIPHER_CTX_set_padding(key->evp_cipher_ctx, EVP_CIPH_NO_PADDING);
+    EVP_CIPHER_CTX_set_padding(key->evp_cipher_ctx, 0);
     EVP_DecryptInit_ex(key->evp_cipher_ctx, s2n_evp_aes_128_cbc_hmac_sha1(), NULL, in->data, NULL);
 
     return 0;
@@ -220,7 +233,7 @@ static int s2n_composite_cipher_aes256_sha_set_encryption_key(struct s2n_session
 {
     POSIX_ENSURE_EQ(in->size, 32);
 
-    EVP_CIPHER_CTX_set_padding(key->evp_cipher_ctx, EVP_CIPH_NO_PADDING);
+    EVP_CIPHER_CTX_set_padding(key->evp_cipher_ctx, 0);
     EVP_EncryptInit_ex(key->evp_cipher_ctx, s2n_evp_aes_256_cbc_hmac_sha1(), NULL, in->data, NULL);
 
     return 0;
@@ -230,7 +243,7 @@ static int s2n_composite_cipher_aes256_sha_set_decryption_key(struct s2n_session
 {
     POSIX_ENSURE_EQ(in->size, 32);
 
-    EVP_CIPHER_CTX_set_padding(key->evp_cipher_ctx, EVP_CIPH_NO_PADDING);
+    EVP_CIPHER_CTX_set_padding(key->evp_cipher_ctx, 0);
     EVP_DecryptInit_ex(key->evp_cipher_ctx, s2n_evp_aes_256_cbc_hmac_sha1(), NULL, in->data, NULL);
 
     return 0;
@@ -240,7 +253,7 @@ static int s2n_composite_cipher_aes128_sha256_set_encryption_key(struct s2n_sess
 {
     POSIX_ENSURE_EQ(in->size, 16);
 
-    EVP_CIPHER_CTX_set_padding(key->evp_cipher_ctx, EVP_CIPH_NO_PADDING);
+    EVP_CIPHER_CTX_set_padding(key->evp_cipher_ctx, 0);
     EVP_EncryptInit_ex(key->evp_cipher_ctx, s2n_evp_aes_128_cbc_hmac_sha256(), NULL, in->data, NULL);
 
     return 0;
@@ -250,7 +263,7 @@ static int s2n_composite_cipher_aes128_sha256_set_decryption_key(struct s2n_sess
 {
     POSIX_ENSURE_EQ(in->size, 16);
 
-    EVP_CIPHER_CTX_set_padding(key->evp_cipher_ctx, EVP_CIPH_NO_PADDING);
+    EVP_CIPHER_CTX_set_padding(key->evp_cipher_ctx, 0);
     EVP_DecryptInit_ex(key->evp_cipher_ctx, s2n_evp_aes_128_cbc_hmac_sha256(), NULL, in->data, NULL);
 
     return 0;
@@ -260,7 +273,7 @@ static int s2n_composite_cipher_aes256_sha256_set_encryption_key(struct s2n_sess
 {
     POSIX_ENSURE_EQ(in->size, 32);
 
-    EVP_CIPHER_CTX_set_padding(key->evp_cipher_ctx, EVP_CIPH_NO_PADDING);
+    EVP_CIPHER_CTX_set_padding(key->evp_cipher_ctx, 0);
     EVP_EncryptInit_ex(key->evp_cipher_ctx, s2n_evp_aes_256_cbc_hmac_sha256(), NULL, in->data, NULL);
 
     return 0;
@@ -270,7 +283,7 @@ static int s2n_composite_cipher_aes256_sha256_set_decryption_key(struct s2n_sess
 {
     POSIX_ENSURE_EQ(in->size, 32);
 
-    EVP_CIPHER_CTX_set_padding(key->evp_cipher_ctx, EVP_CIPH_NO_PADDING);
+    EVP_CIPHER_CTX_set_padding(key->evp_cipher_ctx, 0);
     EVP_DecryptInit_ex(key->evp_cipher_ctx, s2n_evp_aes_256_cbc_hmac_sha256(), NULL, in->data, NULL);
 
     return 0;
