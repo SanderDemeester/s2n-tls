@@ -149,6 +149,8 @@ static S2N_RESULT s2n_set_key(struct s2n_connection *conn, s2n_extract_secret_ty
 
 static S2N_RESULT s2n_client_key_schedule(struct s2n_connection *conn)
 {
+    RESULT_ENSURE_REF(conn);
+
     message_type_t message_type = s2n_conn_get_current_message_type(conn);
 
     /**
@@ -224,6 +226,8 @@ static S2N_RESULT s2n_client_key_schedule(struct s2n_connection *conn)
 
 static S2N_RESULT s2n_server_key_schedule(struct s2n_connection *conn)
 {
+    RESULT_ENSURE_REF(conn);
+
     message_type_t message_type = s2n_conn_get_current_message_type(conn);
 
     /**
@@ -251,6 +255,7 @@ static S2N_RESULT s2n_server_key_schedule(struct s2n_connection *conn)
      */
     if (message_type == SERVER_FINISHED) {
         K_send(conn, S2N_APPLICATION_SECRET);
+        /* clang-format off */
     /**
      *= https://tools.ietf.org/rfc/rfc8446#appendix-A.2
      *# here                  +--------+--------+
@@ -258,6 +263,7 @@ static S2N_RESULT s2n_server_key_schedule(struct s2n_connection *conn)
      *#                       |                 |
      *#   K_recv = handshake  |                 | K_recv = early data
      */
+        /* clang-format on */
         if (WITH_EARLY_DATA(conn)) {
             K_recv(conn, S2N_EARLY_SECRET);
         } else {
@@ -304,7 +310,7 @@ static S2N_RESULT s2n_server_key_schedule(struct s2n_connection *conn)
     return S2N_RESULT_OK;
 }
 
-s2n_result (*key_schedules[])(struct s2n_connection*) = {
+s2n_result (*key_schedules[])(struct s2n_connection *) = {
     [S2N_CLIENT] = &s2n_client_key_schedule,
     [S2N_SERVER] = &s2n_server_key_schedule,
 };

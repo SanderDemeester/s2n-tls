@@ -16,14 +16,11 @@
 #include <stdint.h>
 
 #include "error/s2n_errno.h"
-
+#include "stuffer/s2n_stuffer.h"
 #include "tls/s2n_connection.h"
 #include "tls/s2n_resume.h"
 #include "tls/s2n_tls.h"
 #include "tls/s2n_tls13_handshake.h"
-
-#include "stuffer/s2n_stuffer.h"
-
 #include "utils/s2n_safety.h"
 
 S2N_RESULT s2n_finished_recv(struct s2n_connection *conn, uint8_t *local_verify_data)
@@ -45,13 +42,9 @@ S2N_RESULT s2n_finished_recv(struct s2n_connection *conn, uint8_t *local_verify_
     return S2N_RESULT_OK;
 }
 
-S2N_RESULT s2n_finished_send(struct s2n_connection *conn, uint8_t *seq_num, uint8_t *verify_data)
+S2N_RESULT s2n_finished_send(struct s2n_connection *conn, uint8_t *verify_data)
 {
     RESULT_ENSURE_REF(conn);
-
-    struct s2n_blob seq = { 0 };
-    RESULT_GUARD_POSIX(s2n_blob_init(&seq, seq_num, S2N_TLS_SEQUENCE_NUM_LEN));
-    RESULT_GUARD_POSIX(s2n_blob_zero(&seq));
 
     uint8_t length = conn->handshake.finished_len;
     RESULT_ENSURE_GT(length, 0);
@@ -73,12 +66,9 @@ int s2n_server_finished_send(struct s2n_connection *conn)
     POSIX_ENSURE_REF(conn);
 
     uint8_t *verify_data = conn->handshake.server_finished;
-    uint8_t *seq_num = conn->secure->server_sequence_number;
     POSIX_GUARD(s2n_prf_server_finished(conn));
-    POSIX_GUARD_RESULT(s2n_finished_send(conn, seq_num, verify_data));
-
-    POSIX_ENSURE_REF(conn->secure);
-    conn->server = conn->secure;
+    POSIX_GUARD_RESULT(s2n_finished_send(conn, verify_data));
+    POSIX_GUARD_RESULT(s2n_crypto_parameters_switch(conn));
 
     if (s2n_connection_is_session_resumed(conn)) {
         POSIX_GUARD(s2n_prf_key_expansion(conn));
@@ -87,14 +77,15 @@ int s2n_server_finished_send(struct s2n_connection *conn)
     return S2N_SUCCESS;
 }
 
-int s2n_tls13_server_finished_recv(struct s2n_connection *conn) {
+int s2n_tls13_server_finished_recv(struct s2n_connection *conn)
+{
     POSIX_ENSURE_EQ(conn->actual_protocol_version, S2N_TLS13);
 
     uint8_t length = s2n_stuffer_data_available(&conn->handshake.io);
     S2N_ERROR_IF(length == 0, S2N_ERR_BAD_MESSAGE);
 
     /* read finished mac from handshake */
-    struct s2n_blob wire_finished_mac = {0};
+    struct s2n_blob wire_finished_mac = { 0 };
     s2n_blob_init(&wire_finished_mac, s2n_stuffer_raw_read(&conn->handshake.io, length), length);
 
     /* get tls13 keys */
@@ -106,7 +97,7 @@ int s2n_tls13_server_finished_recv(struct s2n_connection *conn) {
     POSIX_GUARD_RESULT(s2n_handshake_copy_hash_state(conn, keys.hash_algorithm, hash_state));
 
     /* look up finished secret key */
-    struct s2n_blob finished_key = {0};
+    struct s2n_blob finished_key = { 0 };
     POSIX_GUARD(s2n_blob_init(&finished_key, conn->handshake.server_finished, keys.size));
 
     /* generate the hashed message authenticated code */
@@ -119,7 +110,8 @@ int s2n_tls13_server_finished_recv(struct s2n_connection *conn) {
     return 0;
 }
 
-int s2n_tls13_server_finished_send(struct s2n_connection *conn) {
+int s2n_tls13_server_finished_send(struct s2n_connection *conn)
+{
     POSIX_ENSURE_EQ(conn->actual_protocol_version, S2N_TLS13);
 
     /* get tls13 keys */
@@ -131,7 +123,7 @@ int s2n_tls13_server_finished_send(struct s2n_connection *conn) {
     POSIX_GUARD_RESULT(s2n_handshake_copy_hash_state(conn, keys.hash_algorithm, hash_state));
 
     /* look up finished secret key */
-    struct s2n_blob finished_key = {0};
+    struct s2n_blob finished_key = { 0 };
     POSIX_GUARD(s2n_blob_init(&finished_key, conn->handshake.server_finished, keys.size));
 
     /* generate the hashed message authenticated code */

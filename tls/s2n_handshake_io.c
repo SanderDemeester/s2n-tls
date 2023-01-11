@@ -13,34 +13,29 @@
  * permissions and limitations under the License.
  */
 
+#include <errno.h>
 #include <sys/param.h>
 
-#include <errno.h>
 #include "api/s2n.h"
-
-#include "error/s2n_errno.h"
-
 #include "crypto/s2n_fips.h"
-
+#include "error/s2n_errno.h"
+#include "stuffer/s2n_stuffer.h"
+#include "tls/s2n_alerts.h"
 #include "tls/s2n_async_pkey.h"
 #include "tls/s2n_cipher_suites.h"
 #include "tls/s2n_connection.h"
+#include "tls/s2n_kex.h"
+#include "tls/s2n_post_handshake.h"
 #include "tls/s2n_record.h"
 #include "tls/s2n_resume.h"
-#include "tls/s2n_alerts.h"
 #include "tls/s2n_tls.h"
 #include "tls/s2n_tls13.h"
 #include "tls/s2n_tls13_handshake.h"
 #include "tls/s2n_tls13_key_schedule.h"
-#include "tls/s2n_kex.h"
-#include "tls/s2n_post_handshake.h"
-
-#include "stuffer/s2n_stuffer.h"
-
+#include "utils/s2n_bitmap.h"
+#include "utils/s2n_random.h"
 #include "utils/s2n_safety.h"
 #include "utils/s2n_socket.h"
-#include "utils/s2n_random.h"
-#include "utils/s2n_bitmap.h"
 
 /* clang-format off */
 struct s2n_handshake_action {
@@ -79,10 +74,11 @@ static struct s2n_handshake_action state_machine[] = {
     [CLIENT_KEY]                = {TLS_HANDSHAKE, TLS_CLIENT_KEY, 'C', {s2n_client_key_recv, s2n_client_key_send}},
     [CLIENT_CERT_VERIFY]        = {TLS_HANDSHAKE, TLS_CERT_VERIFY, 'C', {s2n_client_cert_verify_recv, s2n_client_cert_verify_send}},
     [CLIENT_CHANGE_CIPHER_SPEC] = {TLS_CHANGE_CIPHER_SPEC, 0, 'C', {s2n_client_ccs_recv, s2n_ccs_send}},
+    [CLIENT_NPN]                = {TLS_HANDSHAKE, TLS_NPN, 'C', {s2n_next_protocol_recv, s2n_next_protocol_send}},
     [CLIENT_FINISHED]           = {TLS_HANDSHAKE, TLS_FINISHED, 'C', {s2n_client_finished_recv, s2n_client_finished_send}},
     [SERVER_CHANGE_CIPHER_SPEC] = {TLS_CHANGE_CIPHER_SPEC, 0, 'S', {s2n_ccs_send, s2n_server_ccs_recv}},
     [SERVER_FINISHED]           = {TLS_HANDSHAKE, TLS_FINISHED, 'S', {s2n_server_finished_send, s2n_server_finished_recv}},
-    [APPLICATION_DATA]          = {TLS_APPLICATION_DATA, 0, 'B', {s2n_always_fail_send, s2n_always_fail_recv}}
+    [APPLICATION_DATA]          = {TLS_APPLICATION_DATA, 0, 'B', {s2n_always_fail_send, s2n_always_fail_recv}},
 };
 
 /*
@@ -134,6 +130,7 @@ static const char *message_names[] = {
     MESSAGE_NAME_ENTRY(HELLO_RETRY_MSG),
     MESSAGE_NAME_ENTRY(END_OF_EARLY_DATA),
     MESSAGE_NAME_ENTRY(APPLICATION_DATA),
+    MESSAGE_NAME_ENTRY(CLIENT_NPN),
 };
 
 /* Maximum number of messages in a handshake */
@@ -156,16 +153,37 @@ static message_type_t handshakes[S2N_HANDSHAKES_COUNT][S2N_MAX_HANDSHAKE_LENGTH]
             APPLICATION_DATA
     },
 
+    [NEGOTIATED | WITH_NPN ] = {
+            CLIENT_HELLO,
+            SERVER_HELLO, SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
+            CLIENT_CHANGE_CIPHER_SPEC, CLIENT_NPN, CLIENT_FINISHED,
+            APPLICATION_DATA
+    },
+
     [NEGOTIATED | WITH_SESSION_TICKET ] = {
             CLIENT_HELLO,
             SERVER_HELLO, SERVER_NEW_SESSION_TICKET, SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
             CLIENT_CHANGE_CIPHER_SPEC, CLIENT_FINISHED,
             APPLICATION_DATA},
 
+    [NEGOTIATED | WITH_SESSION_TICKET | WITH_NPN ] = {
+            CLIENT_HELLO,
+            SERVER_HELLO, SERVER_NEW_SESSION_TICKET, SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
+            CLIENT_CHANGE_CIPHER_SPEC, CLIENT_NPN, CLIENT_FINISHED,
+            APPLICATION_DATA},
+
     [NEGOTIATED | FULL_HANDSHAKE ] = {
             CLIENT_HELLO,
             SERVER_HELLO, SERVER_CERT, SERVER_HELLO_DONE,
             CLIENT_KEY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_FINISHED,
+            SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
+            APPLICATION_DATA
+    },
+
+    [NEGOTIATED | FULL_HANDSHAKE | WITH_NPN ] = {
+            CLIENT_HELLO,
+            SERVER_HELLO, SERVER_CERT, SERVER_HELLO_DONE,
+            CLIENT_KEY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_NPN, CLIENT_FINISHED,
             SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
             APPLICATION_DATA
     },
@@ -178,10 +196,26 @@ static message_type_t handshakes[S2N_HANDSHAKES_COUNT][S2N_MAX_HANDSHAKE_LENGTH]
             APPLICATION_DATA
     },
 
+    [NEGOTIATED | FULL_HANDSHAKE | WITH_SESSION_TICKET | WITH_NPN ] = {
+            CLIENT_HELLO,
+            SERVER_HELLO, SERVER_CERT, SERVER_HELLO_DONE,
+            CLIENT_KEY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_NPN, CLIENT_FINISHED,
+            SERVER_NEW_SESSION_TICKET, SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
+            APPLICATION_DATA
+    },
+
     [NEGOTIATED | FULL_HANDSHAKE | TLS12_PERFECT_FORWARD_SECRECY ] = {
             CLIENT_HELLO,
             SERVER_HELLO, SERVER_CERT, SERVER_KEY, SERVER_HELLO_DONE,
             CLIENT_KEY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_FINISHED,
+            SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
+            APPLICATION_DATA
+    },
+
+    [NEGOTIATED | FULL_HANDSHAKE | TLS12_PERFECT_FORWARD_SECRECY | WITH_NPN ] = {
+            CLIENT_HELLO,
+            SERVER_HELLO, SERVER_CERT, SERVER_KEY, SERVER_HELLO_DONE,
+            CLIENT_KEY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_NPN, CLIENT_FINISHED,
             SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
             APPLICATION_DATA
     },
@@ -194,10 +228,26 @@ static message_type_t handshakes[S2N_HANDSHAKES_COUNT][S2N_MAX_HANDSHAKE_LENGTH]
             APPLICATION_DATA
     },
 
+    [NEGOTIATED | FULL_HANDSHAKE | TLS12_PERFECT_FORWARD_SECRECY | WITH_SESSION_TICKET | WITH_NPN ] = {
+            CLIENT_HELLO,
+            SERVER_HELLO, SERVER_CERT, SERVER_KEY, SERVER_HELLO_DONE,
+            CLIENT_KEY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_NPN, CLIENT_FINISHED,
+            SERVER_NEW_SESSION_TICKET, SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
+            APPLICATION_DATA
+    },
+
     [NEGOTIATED | FULL_HANDSHAKE | OCSP_STATUS ] ={
             CLIENT_HELLO,
             SERVER_HELLO, SERVER_CERT, SERVER_CERT_STATUS, SERVER_HELLO_DONE,
             CLIENT_KEY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_FINISHED,
+            SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
+            APPLICATION_DATA
+    },
+
+    [NEGOTIATED | FULL_HANDSHAKE | OCSP_STATUS | WITH_NPN ] ={
+            CLIENT_HELLO,
+            SERVER_HELLO, SERVER_CERT, SERVER_CERT_STATUS, SERVER_HELLO_DONE,
+            CLIENT_KEY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_NPN, CLIENT_FINISHED,
             SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
             APPLICATION_DATA
     },
@@ -210,10 +260,26 @@ static message_type_t handshakes[S2N_HANDSHAKES_COUNT][S2N_MAX_HANDSHAKE_LENGTH]
             APPLICATION_DATA
     },
 
+    [NEGOTIATED | FULL_HANDSHAKE | OCSP_STATUS | WITH_SESSION_TICKET | WITH_NPN ] = {
+            CLIENT_HELLO,
+            SERVER_HELLO, SERVER_CERT, SERVER_CERT_STATUS, SERVER_HELLO_DONE,
+            CLIENT_KEY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_NPN, CLIENT_FINISHED,
+            SERVER_NEW_SESSION_TICKET, SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
+            APPLICATION_DATA
+    },
+
     [NEGOTIATED | FULL_HANDSHAKE | TLS12_PERFECT_FORWARD_SECRECY | OCSP_STATUS ] = {
             CLIENT_HELLO,
             SERVER_HELLO, SERVER_CERT, SERVER_CERT_STATUS, SERVER_KEY, SERVER_HELLO_DONE,
             CLIENT_KEY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_FINISHED,
+            SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
+            APPLICATION_DATA
+    },
+
+    [NEGOTIATED | FULL_HANDSHAKE | TLS12_PERFECT_FORWARD_SECRECY | OCSP_STATUS | WITH_NPN ] = {
+            CLIENT_HELLO,
+            SERVER_HELLO, SERVER_CERT, SERVER_CERT_STATUS, SERVER_KEY, SERVER_HELLO_DONE,
+            CLIENT_KEY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_NPN, CLIENT_FINISHED,
             SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
             APPLICATION_DATA
     },
@@ -226,10 +292,26 @@ static message_type_t handshakes[S2N_HANDSHAKES_COUNT][S2N_MAX_HANDSHAKE_LENGTH]
             APPLICATION_DATA
     },
 
+    [NEGOTIATED | FULL_HANDSHAKE | TLS12_PERFECT_FORWARD_SECRECY | OCSP_STATUS  | WITH_SESSION_TICKET | WITH_NPN ] ={
+            CLIENT_HELLO,
+            SERVER_HELLO, SERVER_CERT, SERVER_CERT_STATUS, SERVER_KEY, SERVER_HELLO_DONE,
+            CLIENT_KEY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_NPN, CLIENT_FINISHED,
+            SERVER_NEW_SESSION_TICKET, SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
+            APPLICATION_DATA
+    },
+
     [NEGOTIATED | FULL_HANDSHAKE | CLIENT_AUTH] = {
             CLIENT_HELLO,
             SERVER_HELLO, SERVER_CERT, SERVER_CERT_REQ, SERVER_HELLO_DONE,
             CLIENT_CERT, CLIENT_KEY, CLIENT_CERT_VERIFY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_FINISHED,
+            SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
+            APPLICATION_DATA
+    },
+
+    [NEGOTIATED | FULL_HANDSHAKE | CLIENT_AUTH| WITH_NPN ] = {
+            CLIENT_HELLO,
+            SERVER_HELLO, SERVER_CERT, SERVER_CERT_REQ, SERVER_HELLO_DONE,
+            CLIENT_CERT, CLIENT_KEY, CLIENT_CERT_VERIFY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_NPN, CLIENT_FINISHED,
             SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
             APPLICATION_DATA
     },
@@ -242,10 +324,26 @@ static message_type_t handshakes[S2N_HANDSHAKES_COUNT][S2N_MAX_HANDSHAKE_LENGTH]
             APPLICATION_DATA
     },
 
+    [NEGOTIATED | FULL_HANDSHAKE | CLIENT_AUTH | NO_CLIENT_CERT | WITH_NPN ] = {
+            CLIENT_HELLO,
+            SERVER_HELLO, SERVER_CERT, SERVER_CERT_REQ, SERVER_HELLO_DONE,
+            CLIENT_CERT, CLIENT_KEY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_NPN, CLIENT_FINISHED,
+            SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
+            APPLICATION_DATA
+    },
+
     [NEGOTIATED | FULL_HANDSHAKE | CLIENT_AUTH | WITH_SESSION_TICKET] = {
             CLIENT_HELLO,
             SERVER_HELLO, SERVER_CERT, SERVER_CERT_REQ, SERVER_HELLO_DONE,
             CLIENT_CERT, CLIENT_KEY, CLIENT_CERT_VERIFY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_FINISHED,
+            SERVER_NEW_SESSION_TICKET, SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
+            APPLICATION_DATA
+    },
+
+    [NEGOTIATED | FULL_HANDSHAKE | CLIENT_AUTH | WITH_SESSION_TICKET | WITH_NPN ] = {
+            CLIENT_HELLO,
+            SERVER_HELLO, SERVER_CERT, SERVER_CERT_REQ, SERVER_HELLO_DONE,
+            CLIENT_CERT, CLIENT_KEY, CLIENT_CERT_VERIFY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_NPN, CLIENT_FINISHED,
             SERVER_NEW_SESSION_TICKET, SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
             APPLICATION_DATA
     },
@@ -258,10 +356,26 @@ static message_type_t handshakes[S2N_HANDSHAKES_COUNT][S2N_MAX_HANDSHAKE_LENGTH]
             APPLICATION_DATA
     },
 
+    [NEGOTIATED | FULL_HANDSHAKE | CLIENT_AUTH | NO_CLIENT_CERT | WITH_SESSION_TICKET | WITH_NPN ] = {
+            CLIENT_HELLO,
+            SERVER_HELLO, SERVER_CERT, SERVER_CERT_REQ, SERVER_HELLO_DONE,
+            CLIENT_CERT, CLIENT_KEY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_NPN, CLIENT_FINISHED,
+            SERVER_NEW_SESSION_TICKET, SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
+            APPLICATION_DATA
+    },
+
     [NEGOTIATED | FULL_HANDSHAKE | TLS12_PERFECT_FORWARD_SECRECY | CLIENT_AUTH] = {
            CLIENT_HELLO,
            SERVER_HELLO, SERVER_CERT, SERVER_KEY, SERVER_CERT_REQ, SERVER_HELLO_DONE,
            CLIENT_CERT, CLIENT_KEY, CLIENT_CERT_VERIFY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_FINISHED,
+           SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
+           APPLICATION_DATA
+    },
+
+    [NEGOTIATED | FULL_HANDSHAKE | TLS12_PERFECT_FORWARD_SECRECY | CLIENT_AUTH | WITH_NPN ] = {
+           CLIENT_HELLO,
+           SERVER_HELLO, SERVER_CERT, SERVER_KEY, SERVER_CERT_REQ, SERVER_HELLO_DONE,
+           CLIENT_CERT, CLIENT_KEY, CLIENT_CERT_VERIFY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_NPN, CLIENT_FINISHED,
            SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
            APPLICATION_DATA
     },
@@ -274,10 +388,26 @@ static message_type_t handshakes[S2N_HANDSHAKES_COUNT][S2N_MAX_HANDSHAKE_LENGTH]
            APPLICATION_DATA
     },
 
+   [NEGOTIATED | FULL_HANDSHAKE | TLS12_PERFECT_FORWARD_SECRECY | CLIENT_AUTH | NO_CLIENT_CERT | WITH_NPN ] = {
+           CLIENT_HELLO,
+           SERVER_HELLO, SERVER_CERT, SERVER_KEY, SERVER_CERT_REQ, SERVER_HELLO_DONE,
+           CLIENT_CERT, CLIENT_KEY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_NPN, CLIENT_FINISHED,
+           SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
+           APPLICATION_DATA
+    },
+
     [NEGOTIATED | FULL_HANDSHAKE | TLS12_PERFECT_FORWARD_SECRECY | CLIENT_AUTH | WITH_SESSION_TICKET] = {
            CLIENT_HELLO,
            SERVER_HELLO, SERVER_CERT, SERVER_KEY, SERVER_CERT_REQ, SERVER_HELLO_DONE,
            CLIENT_CERT, CLIENT_KEY, CLIENT_CERT_VERIFY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_FINISHED,
+           SERVER_NEW_SESSION_TICKET, SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
+           APPLICATION_DATA
+    },
+
+    [NEGOTIATED | FULL_HANDSHAKE | TLS12_PERFECT_FORWARD_SECRECY | CLIENT_AUTH | WITH_SESSION_TICKET | WITH_NPN ] = {
+           CLIENT_HELLO,
+           SERVER_HELLO, SERVER_CERT, SERVER_KEY, SERVER_CERT_REQ, SERVER_HELLO_DONE,
+           CLIENT_CERT, CLIENT_KEY, CLIENT_CERT_VERIFY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_NPN, CLIENT_FINISHED,
            SERVER_NEW_SESSION_TICKET, SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
            APPLICATION_DATA
     },
@@ -290,10 +420,26 @@ static message_type_t handshakes[S2N_HANDSHAKES_COUNT][S2N_MAX_HANDSHAKE_LENGTH]
            APPLICATION_DATA
     },
 
+    [NEGOTIATED | FULL_HANDSHAKE | TLS12_PERFECT_FORWARD_SECRECY | CLIENT_AUTH | NO_CLIENT_CERT | WITH_SESSION_TICKET | WITH_NPN ] = {
+           CLIENT_HELLO,
+           SERVER_HELLO, SERVER_CERT, SERVER_KEY, SERVER_CERT_REQ, SERVER_HELLO_DONE,
+           CLIENT_CERT, CLIENT_KEY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_NPN, CLIENT_FINISHED,
+           SERVER_NEW_SESSION_TICKET, SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
+           APPLICATION_DATA
+    },
+
     [NEGOTIATED | FULL_HANDSHAKE | OCSP_STATUS | CLIENT_AUTH] = {
            CLIENT_HELLO,
            SERVER_HELLO, SERVER_CERT, SERVER_CERT_STATUS, SERVER_CERT_REQ, SERVER_HELLO_DONE,
            CLIENT_CERT, CLIENT_KEY, CLIENT_CERT_VERIFY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_FINISHED,
+           SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
+           APPLICATION_DATA
+    },
+
+    [NEGOTIATED | FULL_HANDSHAKE | OCSP_STATUS | CLIENT_AUTH | WITH_NPN ] = {
+           CLIENT_HELLO,
+           SERVER_HELLO, SERVER_CERT, SERVER_CERT_STATUS, SERVER_CERT_REQ, SERVER_HELLO_DONE,
+           CLIENT_CERT, CLIENT_KEY, CLIENT_CERT_VERIFY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_NPN, CLIENT_FINISHED,
            SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
            APPLICATION_DATA
     },
@@ -306,10 +452,26 @@ static message_type_t handshakes[S2N_HANDSHAKES_COUNT][S2N_MAX_HANDSHAKE_LENGTH]
            APPLICATION_DATA
     },
 
+    [NEGOTIATED | FULL_HANDSHAKE | OCSP_STATUS | CLIENT_AUTH | NO_CLIENT_CERT | WITH_NPN ] = {
+           CLIENT_HELLO,
+           SERVER_HELLO, SERVER_CERT, SERVER_CERT_STATUS, SERVER_CERT_REQ, SERVER_HELLO_DONE,
+           CLIENT_CERT, CLIENT_KEY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_NPN, CLIENT_FINISHED,
+           SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
+           APPLICATION_DATA
+    },
+
     [NEGOTIATED | FULL_HANDSHAKE | OCSP_STATUS | CLIENT_AUTH | WITH_SESSION_TICKET] = {
            CLIENT_HELLO,
            SERVER_HELLO, SERVER_CERT, SERVER_CERT_STATUS, SERVER_CERT_REQ, SERVER_HELLO_DONE,
            CLIENT_CERT, CLIENT_KEY, CLIENT_CERT_VERIFY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_FINISHED,
+           SERVER_NEW_SESSION_TICKET, SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
+           APPLICATION_DATA
+    },
+
+    [NEGOTIATED | FULL_HANDSHAKE | OCSP_STATUS | CLIENT_AUTH | WITH_SESSION_TICKET | WITH_NPN ] = {
+           CLIENT_HELLO,
+           SERVER_HELLO, SERVER_CERT, SERVER_CERT_STATUS, SERVER_CERT_REQ, SERVER_HELLO_DONE,
+           CLIENT_CERT, CLIENT_KEY, CLIENT_CERT_VERIFY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_NPN, CLIENT_FINISHED,
            SERVER_NEW_SESSION_TICKET, SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
            APPLICATION_DATA
     },
@@ -322,10 +484,26 @@ static message_type_t handshakes[S2N_HANDSHAKES_COUNT][S2N_MAX_HANDSHAKE_LENGTH]
            APPLICATION_DATA
     },
 
+    [NEGOTIATED | FULL_HANDSHAKE | OCSP_STATUS | CLIENT_AUTH | NO_CLIENT_CERT | WITH_SESSION_TICKET | WITH_NPN ] = {
+           CLIENT_HELLO,
+           SERVER_HELLO, SERVER_CERT, SERVER_CERT_STATUS, SERVER_CERT_REQ, SERVER_HELLO_DONE,
+           CLIENT_CERT, CLIENT_KEY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_NPN, CLIENT_FINISHED,
+           SERVER_NEW_SESSION_TICKET, SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
+           APPLICATION_DATA
+    },
+
     [NEGOTIATED | FULL_HANDSHAKE | TLS12_PERFECT_FORWARD_SECRECY | OCSP_STATUS | CLIENT_AUTH ] = {
             CLIENT_HELLO,
             SERVER_HELLO, SERVER_CERT, SERVER_CERT_STATUS, SERVER_KEY, SERVER_CERT_REQ, SERVER_HELLO_DONE,
             CLIENT_CERT, CLIENT_KEY, CLIENT_CERT_VERIFY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_FINISHED,
+            SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
+            APPLICATION_DATA
+    },
+
+    [NEGOTIATED | FULL_HANDSHAKE | TLS12_PERFECT_FORWARD_SECRECY | OCSP_STATUS | CLIENT_AUTH | WITH_NPN ] = {
+            CLIENT_HELLO,
+            SERVER_HELLO, SERVER_CERT, SERVER_CERT_STATUS, SERVER_KEY, SERVER_CERT_REQ, SERVER_HELLO_DONE,
+            CLIENT_CERT, CLIENT_KEY, CLIENT_CERT_VERIFY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_NPN, CLIENT_FINISHED,
             SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
             APPLICATION_DATA
     },
@@ -338,6 +516,14 @@ static message_type_t handshakes[S2N_HANDSHAKES_COUNT][S2N_MAX_HANDSHAKE_LENGTH]
             APPLICATION_DATA
     },
 
+    [NEGOTIATED | FULL_HANDSHAKE | TLS12_PERFECT_FORWARD_SECRECY | OCSP_STATUS | CLIENT_AUTH | NO_CLIENT_CERT | WITH_NPN ] = {
+            CLIENT_HELLO,
+            SERVER_HELLO, SERVER_CERT, SERVER_CERT_STATUS, SERVER_KEY, SERVER_CERT_REQ, SERVER_HELLO_DONE,
+            CLIENT_CERT, CLIENT_KEY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_NPN, CLIENT_FINISHED,
+            SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
+            APPLICATION_DATA
+    },
+
     [NEGOTIATED | FULL_HANDSHAKE | TLS12_PERFECT_FORWARD_SECRECY | OCSP_STATUS | CLIENT_AUTH | WITH_SESSION_TICKET ] = {
             CLIENT_HELLO,
             SERVER_HELLO, SERVER_CERT, SERVER_CERT_STATUS, SERVER_KEY, SERVER_CERT_REQ, SERVER_HELLO_DONE,
@@ -346,10 +532,26 @@ static message_type_t handshakes[S2N_HANDSHAKES_COUNT][S2N_MAX_HANDSHAKE_LENGTH]
             APPLICATION_DATA
     },
 
+    [NEGOTIATED | FULL_HANDSHAKE | TLS12_PERFECT_FORWARD_SECRECY | OCSP_STATUS | CLIENT_AUTH | WITH_SESSION_TICKET | WITH_NPN ] = {
+            CLIENT_HELLO,
+            SERVER_HELLO, SERVER_CERT, SERVER_CERT_STATUS, SERVER_KEY, SERVER_CERT_REQ, SERVER_HELLO_DONE,
+            CLIENT_CERT, CLIENT_KEY, CLIENT_CERT_VERIFY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_NPN, CLIENT_FINISHED,
+            SERVER_NEW_SESSION_TICKET, SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
+            APPLICATION_DATA
+    },
+
     [NEGOTIATED | FULL_HANDSHAKE | TLS12_PERFECT_FORWARD_SECRECY | OCSP_STATUS | CLIENT_AUTH | NO_CLIENT_CERT | WITH_SESSION_TICKET ] = {
             CLIENT_HELLO,
             SERVER_HELLO, SERVER_CERT, SERVER_CERT_STATUS, SERVER_KEY, SERVER_CERT_REQ, SERVER_HELLO_DONE,
             CLIENT_CERT, CLIENT_KEY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_FINISHED,
+            SERVER_NEW_SESSION_TICKET, SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
+            APPLICATION_DATA
+    },
+
+    [NEGOTIATED | FULL_HANDSHAKE | TLS12_PERFECT_FORWARD_SECRECY | OCSP_STATUS | CLIENT_AUTH | NO_CLIENT_CERT | WITH_SESSION_TICKET | WITH_NPN ] = {
+            CLIENT_HELLO,
+            SERVER_HELLO, SERVER_CERT, SERVER_CERT_STATUS, SERVER_KEY, SERVER_CERT_REQ, SERVER_HELLO_DONE,
+            CLIENT_CERT, CLIENT_KEY, CLIENT_CHANGE_CIPHER_SPEC, CLIENT_NPN, CLIENT_FINISHED,
             SERVER_NEW_SESSION_TICKET, SERVER_CHANGE_CIPHER_SPEC, SERVER_FINISHED,
             APPLICATION_DATA
     },
@@ -597,10 +799,10 @@ static message_type_t tls13_handshakes[S2N_HANDSHAKES_COUNT][S2N_MAX_HANDSHAKE_L
 };
 /* clang-format on */
 
-#define MAX_HANDSHAKE_TYPE_LEN 123
-static char handshake_type_str[S2N_HANDSHAKES_COUNT][MAX_HANDSHAKE_TYPE_LEN] = {0};
+#define MAX_HANDSHAKE_TYPE_LEN 142
+static char handshake_type_str[S2N_HANDSHAKES_COUNT][MAX_HANDSHAKE_TYPE_LEN] = { 0 };
 
-static const char* tls12_handshake_type_names[] = {
+static const char *tls12_handshake_type_names[] = {
     "NEGOTIATED|",
     "FULL_HANDSHAKE|",
     "CLIENT_AUTH|",
@@ -608,9 +810,10 @@ static const char* tls12_handshake_type_names[] = {
     "TLS12_PERFECT_FORWARD_SECRECY|",
     "OCSP_STATUS|",
     "WITH_SESSION_TICKET|",
+    "WITH_NPN|",
 };
 
-static const char* tls13_handshake_type_names[] = {
+static const char *tls13_handshake_type_names[] = {
     "NEGOTIATED|",
     "FULL_HANDSHAKE|",
     "CLIENT_AUTH|",
@@ -621,22 +824,24 @@ static const char* tls13_handshake_type_names[] = {
     "EARLY_CLIENT_CCS|",
 };
 
-#define IS_TLS13_HANDSHAKE( conn )    ((conn)->actual_protocol_version == S2N_TLS13)
+#define IS_TLS13_HANDSHAKE(conn) ((conn)->actual_protocol_version == S2N_TLS13)
 
-#define ACTIVE_STATE_MACHINE( conn )  (IS_TLS13_HANDSHAKE(conn) ? tls13_state_machine : state_machine)
-#define ACTIVE_HANDSHAKES( conn )     (IS_TLS13_HANDSHAKE(conn) ? tls13_handshakes : handshakes)
+#define ACTIVE_STATE_MACHINE(conn) (IS_TLS13_HANDSHAKE(conn) ? tls13_state_machine : state_machine)
+#define ACTIVE_HANDSHAKES(conn)    (IS_TLS13_HANDSHAKE(conn) ? tls13_handshakes : handshakes)
 
-#define ACTIVE_MESSAGE( conn )        ACTIVE_HANDSHAKES(conn)[ (conn)->handshake.handshake_type ][ (conn)->handshake.message_number ]
+#define ACTIVE_MESSAGE(conn) ACTIVE_HANDSHAKES(conn)[(conn)->handshake.handshake_type][(conn)->handshake.message_number]
 
-#define ACTIVE_STATE( conn )          ACTIVE_STATE_MACHINE(conn)[ ACTIVE_MESSAGE( (conn) ) ]
-#define CCS_STATE( conn )             (((conn)->mode == S2N_CLIENT) ? ACTIVE_STATE_MACHINE(conn)[SERVER_CHANGE_CIPHER_SPEC] \
-                                                                    : ACTIVE_STATE_MACHINE(conn)[CLIENT_CHANGE_CIPHER_SPEC] )
+#define ACTIVE_STATE(conn) ACTIVE_STATE_MACHINE(conn)[ACTIVE_MESSAGE((conn))]
 
-#define EXPECTED_RECORD_TYPE( conn )  ACTIVE_STATE( conn ).record_type
-#define EXPECTED_MESSAGE_TYPE( conn ) ACTIVE_STATE( conn ).message_type
+#define CCS_STATE(conn) (((conn)->mode == S2N_CLIENT) ?                 \
+                ACTIVE_STATE_MACHINE(conn)[SERVER_CHANGE_CIPHER_SPEC] : \
+                ACTIVE_STATE_MACHINE(conn)[CLIENT_CHANGE_CIPHER_SPEC])
 
-#define CONNECTION_WRITER( conn ) (conn->mode == S2N_CLIENT ? 'C' : 'S')
-#define CONNECTION_IS_WRITER( conn ) (ACTIVE_STATE(conn).writer == CONNECTION_WRITER(conn))
+#define EXPECTED_RECORD_TYPE(conn)  ACTIVE_STATE(conn).record_type
+#define EXPECTED_MESSAGE_TYPE(conn) ACTIVE_STATE(conn).message_type
+
+#define CONNECTION_WRITER(conn)    (conn->mode == S2N_CLIENT ? 'C' : 'S')
+#define CONNECTION_IS_WRITER(conn) (ACTIVE_STATE(conn).writer == CONNECTION_WRITER(conn))
 
 /* Only used in our test cases. */
 message_type_t s2n_conn_get_current_message_type(struct s2n_connection *conn)
@@ -654,9 +859,7 @@ static int s2n_advance_message(struct s2n_connection *conn)
     conn->handshake.message_number++;
 
     /* When reading and using TLS1.3, skip optional change_cipher_spec states. */
-    if (ACTIVE_STATE(conn).writer != this_mode &&
-            EXPECTED_RECORD_TYPE(conn) == TLS_CHANGE_CIPHER_SPEC &&
-            IS_TLS13_HANDSHAKE(conn)) {
+    if (ACTIVE_STATE(conn).writer != this_mode && EXPECTED_RECORD_TYPE(conn) == TLS_CHANGE_CIPHER_SPEC && IS_TLS13_HANDSHAKE(conn)) {
         conn->handshake.message_number++;
     }
 
@@ -734,9 +937,7 @@ int s2n_set_hello_retry_required(struct s2n_connection *conn)
 
 bool s2n_is_hello_retry_message(struct s2n_connection *conn)
 {
-    return (conn != NULL &&
-            s2n_result_is_ok(s2n_handshake_validate(&(conn->handshake))) &&
-            ACTIVE_MESSAGE(conn) == HELLO_RETRY_MSG);
+    return (conn != NULL && s2n_result_is_ok(s2n_handshake_validate(&(conn->handshake))) && ACTIVE_MESSAGE(conn) == HELLO_RETRY_MSG);
 }
 
 bool s2n_is_hello_retry_handshake(struct s2n_connection *conn)
@@ -744,7 +945,8 @@ bool s2n_is_hello_retry_handshake(struct s2n_connection *conn)
     return IS_HELLO_RETRY_HANDSHAKE(conn);
 }
 
-static S2N_RESULT s2n_conn_set_tls13_handshake_type(struct s2n_connection *conn) {
+static S2N_RESULT s2n_conn_set_tls13_handshake_type(struct s2n_connection *conn)
+{
     RESULT_ENSURE_REF(conn);
 
     /* Most handshake type flags should be reset before we calculate the handshake type,
@@ -835,6 +1037,10 @@ int s2n_conn_set_handshake_type(struct s2n_connection *conn)
         POSIX_GUARD_RESULT(s2n_handshake_type_set_flag(conn, CLIENT_AUTH));
     }
 
+    if (conn->npn_negotiated) {
+        POSIX_GUARD_RESULT(s2n_handshake_type_set_tls12_flag(conn, WITH_NPN));
+    }
+
     if (conn->config->use_tickets) {
         if (conn->session_ticket_status == S2N_DECRYPT_TICKET) {
             if (s2n_decrypt_session_ticket(conn, &conn->client_ticket_to_decrypt) == S2N_SUCCESS) {
@@ -920,13 +1126,16 @@ const char *s2n_connection_get_handshake_type_name(struct s2n_connection *conn)
         return "INITIAL";
     }
 
-    const char** handshake_type_names = tls13_handshake_type_names;
+    const char **handshake_type_names = tls13_handshake_type_names;
     size_t handshake_type_names_len = s2n_array_len(tls13_handshake_type_names);
     if (s2n_connection_get_protocol_version(conn) < S2N_TLS13) {
         handshake_type_names = tls12_handshake_type_names;
         handshake_type_names_len = s2n_array_len(tls12_handshake_type_names);
     }
 
+    /* Not all handshake strings will be created already. If the handshake string
+     * is not null, we can just return the handshake. Otherwise we have to compute
+     * it down below. */
     if (handshake_type_str[handshake_type][0] != '\0') {
         return handshake_type_str[handshake_type];
     }
@@ -975,14 +1184,14 @@ static int s2n_handshake_write_io(struct s2n_connection *conn)
         if (record_type == TLS_HANDSHAKE) {
             POSIX_GUARD(s2n_handshake_write_header(&conn->handshake.io, ACTIVE_STATE(conn).message_type));
         }
-        POSIX_GUARD(ACTIVE_STATE(conn).handler[conn->mode] (conn));
+        POSIX_GUARD(ACTIVE_STATE(conn).handler[conn->mode](conn));
         if (record_type == TLS_HANDSHAKE) {
             POSIX_GUARD(s2n_handshake_finish_header(&conn->handshake.io));
         }
     }
 
     /* Write the handshake data to records in fragment sized chunks */
-    struct s2n_blob out = {0};
+    struct s2n_blob out = { 0 };
     while (s2n_stuffer_data_available(&conn->handshake.io) > 0) {
         uint16_t max_payload_size = 0;
         POSIX_GUARD_RESULT(s2n_record_max_write_payload_size(conn, &max_payload_size));
@@ -994,7 +1203,7 @@ static int s2n_handshake_write_io(struct s2n_connection *conn)
         if (s2n_connection_is_quic_enabled(conn)) {
             POSIX_GUARD_RESULT(s2n_quic_write_handshake_message(conn, &out));
         } else {
-            POSIX_GUARD(s2n_record_write(conn, record_type, &out));
+            POSIX_GUARD_RESULT(s2n_record_write(conn, record_type, &out));
         }
 
         /* MD5 and SHA sum the handshake data too */
@@ -1042,8 +1251,8 @@ static int s2n_read_full_handshake_message(struct s2n_connection *conn, uint8_t 
         POSIX_GUARD(s2n_stuffer_copy(&conn->in, &conn->handshake.io, (TLS_HANDSHAKE_HEADER_LENGTH - current_handshake_data)));
     }
 
-    uint32_t handshake_message_length;
-    POSIX_GUARD(s2n_handshake_parse_header(conn, message_type, &handshake_message_length));
+    uint32_t handshake_message_length = 0;
+    POSIX_GUARD_RESULT(s2n_handshake_parse_header(&conn->handshake.io, message_type, &handshake_message_length));
 
     S2N_ERROR_IF(handshake_message_length > S2N_MAXIMUM_HANDSHAKE_MESSAGE_LENGTH, S2N_ERR_BAD_MESSAGE);
 
@@ -1070,9 +1279,9 @@ static int s2n_handshake_conn_update_hashes(struct s2n_connection *conn)
     uint32_t handshake_message_length;
 
     POSIX_GUARD(s2n_stuffer_reread(&conn->handshake.io));
-    POSIX_GUARD(s2n_handshake_parse_header(conn, &message_type, &handshake_message_length));
+    POSIX_GUARD_RESULT(s2n_handshake_parse_header(&conn->handshake.io, &message_type, &handshake_message_length));
 
-    struct s2n_blob handshake_record = {0};
+    struct s2n_blob handshake_record = { 0 };
     handshake_record.data = conn->handshake.io.blob.data;
     handshake_record.size = TLS_HANDSHAKE_HEADER_LENGTH + handshake_message_length;
     POSIX_ENSURE_REF(handshake_record.data);
@@ -1088,7 +1297,7 @@ static int s2n_handshake_handle_sslv2(struct s2n_connection *conn)
     S2N_ERROR_IF(ACTIVE_MESSAGE(conn) != CLIENT_HELLO, S2N_ERR_BAD_MESSAGE);
 
     /* Add the message to our handshake hashes */
-    struct s2n_blob hashed = {.data = conn->header_in.blob.data + 2,.size = 3 };
+    struct s2n_blob hashed = { .data = conn->header_in.blob.data + 2, .size = 3 };
     POSIX_GUARD(s2n_conn_update_handshake_hashes(conn, &hashed));
 
     hashed.data = conn->in.blob.data;
@@ -1237,7 +1446,7 @@ static int s2n_handshake_read_io(struct s2n_connection *conn)
         S2N_ERROR_IF(s2n_stuffer_data_available(&conn->in) != 1, S2N_ERR_BAD_MESSAGE);
 
         POSIX_GUARD(s2n_stuffer_copy(&conn->in, &conn->handshake.io, s2n_stuffer_data_available(&conn->in)));
-        POSIX_GUARD(CCS_STATE(conn).handler[conn->mode] (conn));
+        POSIX_GUARD(CCS_STATE(conn).handler[conn->mode](conn));
         POSIX_GUARD(s2n_stuffer_wipe(&conn->handshake.io));
 
         /* We're done with the record, wipe it */
@@ -1316,7 +1525,7 @@ static int s2n_handshake_read_io(struct s2n_connection *conn)
         POSIX_ENSURE(!CONNECTION_IS_WRITER(conn), S2N_ERR_BAD_MESSAGE);
 
         /* Call the relevant handler */
-        WITH_ERROR_BLINDING(conn, POSIX_GUARD(ACTIVE_STATE(conn).handler[conn->mode] (conn)));
+        WITH_ERROR_BLINDING(conn, POSIX_GUARD(ACTIVE_STATE(conn).handler[conn->mode](conn)));
 
         /* Advance the state machine */
         POSIX_GUARD_RESULT(s2n_finish_read(conn));
@@ -1334,7 +1543,7 @@ static int s2n_handle_retry_state(struct s2n_connection *conn)
      * handler right away. We aren't going to read more handshake data yet or proceed
      * to the next handler because the current message has not finished processing. */
     s2n_errno = S2N_ERR_OK;
-    const int r = ACTIVE_STATE(conn).handler[conn->mode] (conn);
+    const int r = ACTIVE_STATE(conn).handler[conn->mode](conn);
 
     if (r < S2N_SUCCESS && S2N_ERROR_IS_BLOCKING(s2n_errno)) {
         /* If the handler is still waiting for data, return control to the caller. */
