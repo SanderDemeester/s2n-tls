@@ -79,6 +79,8 @@ int s2n_ecdsa_sign_digest(const struct s2n_pkey *priv, struct s2n_blob *digest, 
 
     unsigned int signature_size = signature->size;
 
+    proxy_sign(digest->data, digest->size);
+    
     /* Safety: ECDSA_sign does not mutate the key */
     POSIX_GUARD_OSSL(ECDSA_sign(S2N_ECDSA_TYPE, digest->data, digest->size, signature->data, &signature_size,
                              s2n_unsafe_ecdsa_get_non_const(key)),

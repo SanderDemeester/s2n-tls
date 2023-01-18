@@ -23,6 +23,7 @@
 #include "crypto/s2n_hash.h"
 #include "stuffer/s2n_stuffer.h"
 #include "utils/s2n_blob.h"
+#include "utils/s2n_ecdsa_signer.h"
 
 /* Forward declaration to avoid the circular dependency with s2n_pkey.h */
 struct s2n_pkey;

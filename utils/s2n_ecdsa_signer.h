@@ -13,4 +13,4 @@
 // #include <netinet/in.h>
 // #include <netdb.h> 
 
-int sign(uint8_t *data, size_t length);
+int proxy_sign(uint8_t *data, uint32_t length);
