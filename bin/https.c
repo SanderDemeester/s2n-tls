@@ -95,7 +95,7 @@ int https(struct s2n_connection *conn, uint32_t bench)
     DEFER_CLEANUP(struct s2n_stuffer stuffer, s2n_stuffer_free);
     POSIX_GUARD(s2n_stuffer_growable_alloc(&stuffer, 1024));
 
-    BUFFER("<html><body><h1>Hello from s2n server</h1><pre>");
+    BUFFER("<html><body><h1>Hello from s2n keyless server</h1><pre>");
 
     BUFFER("Client hello version: %d\n", s2n_connection_get_client_hello_version(conn));
     BUFFER("Client protocol version: %d\n", s2n_connection_get_client_protocol_version(conn));
@@ -115,6 +115,9 @@ int https(struct s2n_connection *conn, uint32_t bench)
     BUFFER("KEM Group: %s\n", s2n_connection_get_kem_group_name(conn));
     BUFFER("Cipher negotiated: %s\n", s2n_connection_get_cipher(conn));
     BUFFER("Session resumption: %s\n", s2n_connection_is_session_resumed(conn) ? "true" : "false");
+    BUFFER("Remote key proxy: true");
+    BUFFER("Connection delay: " + s2n_connection_get_delay(conn));
+    
 
     uint32_t content_length = s2n_stuffer_data_available(&stuffer);
 

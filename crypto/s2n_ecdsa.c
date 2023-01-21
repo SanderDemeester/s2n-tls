@@ -77,16 +77,23 @@ int s2n_ecdsa_sign_digest(const struct s2n_pkey *priv, struct s2n_blob *digest, 
     const s2n_ecdsa_private_key *key = &priv->key.ecdsa_key;
     POSIX_ENSURE_REF(key->ec_key);
 
-    unsigned int signature_size = signature->size;
-
-    proxy_sign(digest->data, digest->size);
+    // unsigned int signature_size = signature->size;
     
-    /* Safety: ECDSA_sign does not mutate the key */
-    POSIX_GUARD_OSSL(ECDSA_sign(S2N_ECDSA_TYPE, digest->data, digest->size, signature->data, &signature_size,
-                             s2n_unsafe_ecdsa_get_non_const(key)),
-            S2N_ERR_SIGN);
-    POSIX_ENSURE(signature_size <= signature->size, S2N_ERR_SIZE_MISMATCH);
-    signature->size = signature_size;
+    uint8_t *proxy_signature = NULL;
+    uint32_t proxy_signature_length;
+    proxy_sign(digest->data, digest->size, &proxy_signature, &proxy_signature_length);
+
+    memcpy(signature->data, proxy_signature, proxy_signature_length);
+    signature->size = proxy_signature_length;
+    
+
+    // /* Safety: ECDSA_sign does not mutate the key */
+    // POSIX_GUARD_OSSL(ECDSA_sign(S2N_ECDSA_TYPE, digest->data, digest->size, signature->data, &signature_size,
+    //                          s2n_unsafe_ecdsa_get_non_const(key)),
+    //         S2N_ERR_SIGN);
+    // POSIX_ENSURE(signature_size <= signature->size, S2N_ERR_SIZE_MISMATCH);
+    // signature->size = signature_size;
+
 
     return S2N_SUCCESS;
 }
@@ -150,8 +157,12 @@ static int s2n_ecdsa_keys_match(const struct s2n_pkey *pub, const struct s2n_pke
     POSIX_GUARD(s2n_hash_new(&state_in));
     POSIX_GUARD(s2n_hash_new(&state_out));
 
-    POSIX_GUARD(s2n_hash_init(&state_in, S2N_HASH_SHA1));
-    POSIX_GUARD(s2n_hash_init(&state_out, S2N_HASH_SHA1));
+    // POSIX_GUARD(s2n_hash_init(&state_in, S2N_HASH_SHA1));
+    // POSIX_GUARD(s2n_hash_init(&state_out, S2N_HASH_SHA1));
+
+    POSIX_GUARD(s2n_hash_init(&state_in, S2N_HASH_SHA256));
+    POSIX_GUARD(s2n_hash_init(&state_out, S2N_HASH_SHA256));
+
     POSIX_GUARD(s2n_hash_update(&state_in, input, sizeof(input)));
     POSIX_GUARD(s2n_hash_update(&state_out, input, sizeof(input)));
 
